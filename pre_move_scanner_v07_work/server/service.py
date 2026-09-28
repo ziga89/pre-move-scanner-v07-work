@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 from . import __version__
 from .config import resolve_path
 from .engine.asset_state import PRE_MOVE_STATUSES, STATUS_ORDER, AssetState
+from .engine.alerts import HighConvictionAlerts
 from .engine.events import EventDetector
 from .engine.host import LocalEngineHost, MarketSpec, ProcessEngineHost
 from .engine.leadlag import price_lead_lag
@@ -31,7 +32,7 @@ from .intel.monitor import IntelMonitor
 from .intel.scores import compute_scores, entity_balances
 from .intel.store import DbIntelStore
 from .storage.db import Database, prune
-from .storage.history import (asset_history, asset_row_1m, asset_row_5s, event_row, events_query, fill_outcomes,
+from .storage.history import (alert_events_query, asset_history, asset_row_1m, asset_row_5s, event_row, events_query, fill_outcomes,
                               load_asset_closes, load_market_minutes, market_row_10s, market_row_1m, outcome_summary,
                               venue_history)
 from .storage.schema import ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_10S_COLS, MARKET_1M_COLS
@@ -70,6 +71,7 @@ class ScannerService:
         self.selector = VenueSelector(cfg["discovery"])
         self.universe = UniverseManager(cfg["universe"])
         self.events = EventDetector(cfg["events"])
+        self.alerts = HighConvictionAlerts(cfg.get("alerts", {}))
         self.http = HttpClient()
         self.cg = CoinGeckoClient(self.http, cfg["universe"])
         self.catalogs: Dict[str, Catalog] = {}
@@ -454,6 +456,15 @@ class ScannerService:
                 self.fx.update_live(asset, res["price"])
             evs = self.events.process(res)
             new_events.extend(evs)
+            active_alert, alert_events, alert_fired = self.alerts.update(res, now)
+            if active_alert:
+                res["high_conviction_alert"] = active_alert
+            else:
+                res["high_conviction_alert"] = None
+            for ae in alert_events:
+                new_events.append(self.events.add_external(ae))
+            if alert_fired:
+                outcomes.append((now, asset, "HIGH_CONVICTION", res.get("premove"), res.get("price")))
             for t in res.get("transitions", []):
                 if t["kind"] == "status" and t["to"] in ("EMERGING", "CONFIRMED PRE-MOVE", "STRONG PRE-MOVE"):
                     outcomes.append((now, asset, t["to"], res.get("premove"), res.get("price")))
@@ -516,8 +527,10 @@ class ScannerService:
         counts: Dict[str, int] = {}
         for x in rows:
             counts[x["status"]] = counts.get(x["status"], 0) + 1
+        max_alerts = int(self.cfg.get("alerts", {}).get("max_active_banners", 3))
         return _json_safe({"ts": self.clock(), "version": __version__, "mode": "sim" if self.sim else "live",
-                           "rows": rows, "counts": counts, "universe": self.status.get("universe"),
+                           "rows": rows, "counts": counts, "alerts": self.alerts.active()[:max_alerts],
+                           "universe": self.status.get("universe"),
                            "discovery": self.status.get("discovery")})
 
     def coin_payload(self, asset: str) -> Optional[Dict[str, Any]]:
@@ -548,6 +561,7 @@ class ScannerService:
         out.update({"info": info.__dict__ if info else None,
                     "selection": sel.to_dict() if sel else None, "books": books, "leadlag": leadlag,
                     "onsets": self.assets[asset].onsets.active() if asset in self.assets else [],
+                    "high_conviction_alert": self.alerts.get(asset),
                     "events": self.events.recent(asset, now - 6 * 3600)[-80:],
                     "wallet": wallet, "unsupported_top": self.unsupported_top.get(asset, []),
                     "fx": {q: self.fx.rate(q) for q in {v.get("quote") for v in r.get("venues", [])} if q}})
@@ -567,6 +581,7 @@ class ScannerService:
             "intel_status": (self.intel.status if self.intel else "disabled"),
             "storage": self.db.stats(), "fx": self.fx.snapshot(),
             "labels": {"count": len(self.labels.labels), "errors": self.labels.errors[:20]},
+            "alerts": {"active": len(self.alerts.active()), "enabled": bool(self.cfg.get("alerts", {}).get("enabled", True))},
         })
 
     def universe_payload(self) -> Dict[str, Any]:
@@ -595,7 +610,18 @@ class ScannerService:
     async def outcomes(self, days: float = 30.0) -> Dict[str, Any]:
         rows = await self.db.read(outcome_summary, self.clock() - days * 86400)
         return _json_safe({"days": days, "by_status": rows,
-                           "note": "Forward returns after each EMERGING / CONFIRMED / STRONG signal (calibration aid)."})
+                           "note": "Forward returns after EMERGING / CONFIRMED / STRONG / HIGH_CONVICTION signals (calibration aid)."})
+
+    def alerts_payload(self) -> Dict[str, Any]:
+        return _json_safe({
+            "ts": self.clock(),
+            "active": self.alerts.active(),
+            "note": "HIGH_CONVICTION is a strict composite evidence alert, not a probability or proof of a purchase.",
+        })
+
+    async def alert_history(self, days: float = 30.0, limit: int = 500) -> Dict[str, Any]:
+        rows = await self.db.read(alert_events_query, self.clock() - days * 86400.0, limit)
+        return _json_safe({"days": days, "events": rows})
 
     def state_compat(self) -> Dict[str, Any]:
         """v0.6-compatible /api/state shape (for old clients)."""

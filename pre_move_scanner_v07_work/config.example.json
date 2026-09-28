@@ -2,8 +2,15 @@
   "mode": "live",
   "universe": {
     "target_size": 100,
-    "pinned_assets": ["QNT", "LINK", "XDC"],
-    "coingecko_ids": {"QNT": "quant-network", "LINK": "chainlink"},
+    "pinned_assets": [
+      "QNT",
+      "LINK",
+      "XDC"
+    ],
+    "coingecko_ids": {
+      "QNT": "quant-network",
+      "LINK": "chainlink"
+    },
     "exclude_symbols": [],
     "include_symbols": [],
     "refresh_minutes": 60,
@@ -11,8 +18,23 @@
     "coingecko_api_key_type": "demo"
   },
   "discovery": {
-    "exchanges": ["binance", "okx", "bybit", "coinbase", "kraken", "kucoin", "gate", "mexc",
-                  "bitget", "htx", "cryptocom", "upbit", "bitfinex", "bitstamp", "bitrue"],
+    "exchanges": [
+      "binance",
+      "okx",
+      "bybit",
+      "coinbase",
+      "kraken",
+      "kucoin",
+      "gate",
+      "mexc",
+      "bitget",
+      "htx",
+      "cryptocom",
+      "upbit",
+      "bitfinex",
+      "bitstamp",
+      "bitrue"
+    ],
     "max_venues_per_asset": 5,
     "refresh_minutes": 45,
     "min_market_volume_usd": 50000,
@@ -36,8 +58,24 @@
     "labels_file": "labels/wallet_labels.csv",
     "daily_call_budget": 90000,
     "tokens": {
-      "QNT": {"chain": "ethereum", "contract": "0x4a220E6096B25EADb88358cb44068A3248254675", "token_wide": "auto"},
-      "LINK": {"chain": "ethereum", "contract": "0x514910771AF9Ca656af840dff83E8264EcF986CA", "token_wide": "off"}
+      "QNT": {
+        "chain": "ethereum",
+        "contract": "0x4a220E6096B25EADb88358cb44068A3248254675",
+        "token_wide": "auto"
+      },
+      "LINK": {
+        "chain": "ethereum",
+        "contract": "0x514910771AF9Ca656af840dff83E8264EcF986CA",
+        "token_wide": "off"
+      }
     }
+  },
+  "alerts": {
+    "enabled": true,
+    "persistence_seconds": 120,
+    "min_confirmed_venues": 3,
+    "min_premove_with_wallet": 82,
+    "min_premove_wallet_neutral": 86,
+    "min_premove_no_wallet": 90
   }
 }

@@ -12,7 +12,7 @@ from typing import Any, Deque, Dict, List, Optional
 
 SEVERITY = {"STRONG PRE-MOVE": 3, "CONFIRMED PRE-MOVE": 2, "EMERGING": 2, "LATE": 2,
             "MOVE IN PROGRESS": 1, "WATCH": 1}
-PRECURSOR_CATEGORIES = ("BOOK", "FLOW", "VENUE", "STATUS", "SCORE", "WALLET")
+PRECURSOR_CATEGORIES = ("BOOK", "FLOW", "VENUE", "STATUS", "SCORE", "WALLET", "ALERT")
 
 
 def _fmt_pct(x: Optional[float]) -> str:

@@ -1,3 +1,13 @@
+# v0.7.2 — High-conviction alert rail
+
+- Added a strict HIGH-CONVICTION BUY SETUP engine above the ordinary Pre-Move score.
+- Requires sustained cross-venue market structure + execution confirmation while price is still flat.
+- Wallet/CEX intelligence can strengthen or veto an alert; internal/reshuffling flows are never treated as proof of buying.
+- Added 120 s persistence, clearing hysteresis, single-large-trade rejection, stale/coverage gates and hostile-wallet veto.
+- Added a sticky green global alert rail on every web view, click-through to coin detail, and green ALERT chart/timeline markers.
+- Added `/api/alerts` and `/api/alerts/history`; fired alerts are also stored in `signal_outcomes` for forward-return calibration.
+- Evidence score is explicitly a composite evidence strength, not a probability or guarantee.
+
 # Changelog
 
 ## v0.7.1 — KuCoin stream fix, client lifecycle, honest self-test

@@ -56,9 +56,9 @@ function route() {
     openCoin(asset);
     coinTopic = "coin:" + asset;
     conn.subscribe(coinTopic);
-    document.title = `${asset} · Pre‑Move Scanner v0.7`;
+    document.title = `${asset} · Pre‑Move Scanner v0.7.2`;
   } else {
-    document.title = "Pre‑Move Scanner v0.7";
+    document.title = "Pre‑Move Scanner v0.7.2";
   }
   if (next === "health") conn.subscribe("health"); else conn.unsubscribe("health");
   if (next === "health") fetch("/api/health", { cache: "no-store" }).then(r => r.json()).then(renderHealth).catch(() => {});

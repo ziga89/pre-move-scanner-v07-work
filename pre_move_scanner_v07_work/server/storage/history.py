@@ -214,6 +214,20 @@ def events_query(con: sqlite3.Connection, asset: str, since: float, limit: int =
     return rows
 
 
+def alert_events_query(con: sqlite3.Connection, since: float, limit: int = 500) -> List[Dict[str, Any]]:
+    rows = []
+    for r in con.execute("SELECT * FROM events WHERE category='ALERT' AND ts>=? ORDER BY ts DESC LIMIT ?",
+                         (since, limit)):
+        d = dict(r)
+        try:
+            d["evidence"] = json.loads(d.get("evidence") or "{}")
+        except ValueError:
+            d["evidence"] = {}
+        rows.append(d)
+    rows.reverse()
+    return rows
+
+
 def load_market_minutes(con: sqlite3.Connection, asset: str, exchange: str, since: float) -> List[Dict[str, Any]]:
     cols = ",".join(["ts"] + list(MINUTE_RAW))
     return [dict(r) for r in con.execute(

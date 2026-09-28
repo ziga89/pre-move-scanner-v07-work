@@ -7,7 +7,7 @@ const PAL = ["#5eead4", "#fbbf24", "#fb7185", "#60a5fa", "#c084fc", "#34d399", "
 const EVENT_COL = {
   STATUS: "rgba(251,113,133,.7)", SCORE: "rgba(251,113,133,.55)", BOOK: "rgba(96,165,250,.55)",
   FLOW: "rgba(52,211,153,.5)", VENUE: "rgba(251,191,36,.55)", PRICE: "rgba(241,245,249,.55)",
-  WALLET: "rgba(192,132,252,.6)", SYSTEM: "rgba(148,163,184,.3)", LEGACY: "rgba(148,163,184,.35)",
+  WALLET: "rgba(192,132,252,.6)", ALERT: "rgba(61,220,151,.95)", SYSTEM: "rgba(148,163,184,.3)", LEGACY: "rgba(148,163,184,.35)",
 };
 
 function setup(canvas) {
