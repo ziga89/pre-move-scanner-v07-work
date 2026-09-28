@@ -10,6 +10,7 @@ Measures, separately from the synthetic data generator:
 from __future__ import annotations
 
 import argparse
+import gc
 import sys
 import time
 import tracemalloc
@@ -30,11 +31,18 @@ def main():
     ap.add_argument("--venues", type=int, default=4)
     ap.add_argument("--minutes", type=float, default=3.0)
     ap.add_argument("--book-hz", type=float, default=4.0, help="book updates per second per market")
+    ap.add_argument("--no-gc-tune", action="store_true", help="measure with default garbage-collector settings")
     a = ap.parse_args()
+    gc_time = [0.0, 0.0]
+
+    def gc_cb(phase, info):
+        if phase == "start":
+            gc_time[1] = time.perf_counter()
+        else:
+            gc_time[0] += time.perf_counter() - gc_time[1]
+    gc.callbacks.append(gc_cb)
     cfg = deep_merge(DEFAULTS, {"engine": {"min_baseline_minutes": 1, "baseline_lag_minutes": 0}})
-    tracemalloc.start()
     world = SimWorld(n_assets=a.assets, venues_per_asset=min(a.venues, 5), seed=3, scenarios=False)
-    snap0 = tracemalloc.take_snapshot()
     states = {}
     assets = {}
     t0 = 1_760_000_000.0
@@ -44,6 +52,9 @@ def main():
         states[key] = MarketState(asset, ex, sym, m.quote, lambda q: 1.0, cfg["engine"], cfg["feeds"], now=t0, stagger=i)
         assets.setdefault(asset, AssetState(asset, cfg, stagger=i))
     n_markets = len(states)
+    if not a.no_gc_tune:
+        from server.engine import tune_gc
+        tune_gc()
     by_asset = {}
     for key, st in states.items():
         by_asset.setdefault(st.asset, []).append(st)
@@ -77,12 +88,21 @@ def main():
             tick += k
             worst_tick = max(worst_tick, k)
     secs = a.minutes * 60
-    # Fill 24 h of minute records to measure steady-state memory of the baseline rings.
-    for st in states.values():
-        rec = {f: 1.0 for f in st.minutes.fields}
+    # Memory: a separate pass with tracemalloc (tracing slows code ~5-10x, so it must
+    # never be active during the timed phase). Engine state incl. full 24 h minute rings.
+    tracemalloc.start()
+    snap0 = tracemalloc.take_snapshot()
+    mem_states = []
+    for i, (key, m) in enumerate(world.markets.items()):
+        st2 = MarketState(key[1].split("/")[0], key[0], key[1], m.quote, lambda q: 1.0, cfg["engine"], cfg["feeds"],
+                          now=t0, stagger=i)
+        rec = {f: 1.0 for f in st2.minutes.fields}
         for mi in range(1440):
-            st.minutes.append(int(t0) + 86400 + mi * 60, rec)
+            st2.minutes.append(int(t0) + mi * 60, rec)
+        mem_states.append(st2)
+    mem_assets = [AssetState(x, cfg) for x in assets]
     snap1 = tracemalloc.take_snapshot()
+    tracemalloc.stop()
     mem = sum(s.size_diff for s in snap1.compare_to(snap0, "filename"))
     print(f"markets: {n_markets} ({a.assets} assets x ~{n_markets / a.assets:.1f} venues), simulated {secs:.0f}s, "
           f"{n_book / secs:.0f} book updates/s, {n_trades / secs:.0f} trades/s")
@@ -90,6 +110,7 @@ def main():
     print(f"tick CPU      : {tick / secs * 1000:.0f} ms per 1 s tick (worst {worst_tick * 1000:.0f} ms)  "
           f"-> {tick / secs * 100:.1f}% of one core")
     print(f"engine memory : {mem / 2**20:.0f} MB incl. 24 h minute rings (~{mem / n_markets / 1024:.0f} KB per market)")
+    print(f"garbage collector: {gc_time[0] / secs * 100:.1f}% of one core ({'default' if a.no_gc_tune else 'tuned'} settings)")
     print(f"(synthetic data generation, not part of the scanner: {gen / secs * 100:.0f}% of one core)")
 
 

@@ -151,6 +151,8 @@ class ScannerService:
         await self.refresh_catalogs()
         await self.refresh_universe()
         await self.apply_selection()
+        from .engine import tune_gc
+        tune_gc()  # long-lived state out of GC scans (avoids tick-time spikes)
         self._tasks += [asyncio.ensure_future(self._tick_loop()),
                         asyncio.ensure_future(self._universe_loop()),
                         asyncio.ensure_future(self._discovery_loop()),

@@ -284,8 +284,8 @@ class AssetState:
 
         venues = []
         for f, fl in zip(feats, flags):
-            v = {k: (rnd(val, 6) if isinstance(val, float) else val) for k, val in f.items()}
-            v["flags"] = {k: rnd(fl[k], 3) for k in FAMILIES}
+            v = dict(f)  # raw values; rounding / NaN-cleaning happens only when serialising
+            v["flags"] = {k: fl[k] for k in FAMILIES}
             v["active_families"] = fl["active"]
             v["confirmed"] = fl["confirmed"]
             venues.append(v)
@@ -309,8 +309,7 @@ class AssetState:
                         "n_families": 0, "reasons": [], "reason": "no live market data",
                         "pipeline": None, "late": None, "returns": {}})
         else:
-            agg_out = {k: (rnd(v, 6) if isinstance(v, float) else v) for k, v in agg.items()
-                       if k not in ("weights", "live_idx", "score_idx", "warmed_idx")}
+            agg_out = {k: v for k, v in agg.items() if k not in ("weights", "live_idx", "score_idx", "warmed_idx")}
             reasons = build_reasons(self.asset, agg, pipe, late, returns, comp, prop, intel, status)
             res.update({
                 "premove": rnd(pipe["premove"], 1), "fast": rnd(pipe["fast"], 1), "slow": rnd(pipe["slow"], 1),

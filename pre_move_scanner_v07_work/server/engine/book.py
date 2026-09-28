@@ -25,12 +25,14 @@ Level = Tuple[float, float]
 
 class BandBook:
     __slots__ = (
-        "band", "bids", "asks", "bid_levels", "ask_levels", "best_bid", "best_ask", "mid",
+        "band", "flow_band", "bids", "asks", "bid_levels", "ask_levels", "best_bid", "best_ask", "mid",
         "bid_floor", "ask_ceiling", "bid_cov_price", "ask_cov_price", "updates",
     )
 
-    def __init__(self, band_pct: float = 2.0):
+    def __init__(self, band_pct: float = 2.0, flow_band_pct: Optional[float] = None):
         self.band = float(band_pct) / 100.0
+        # Add/remove accounting (replenishment, cancel proxy) uses the near-touch band.
+        self.flow_band = min(self.band, float(flow_band_pct) / 100.0) if flow_band_pct else self.band
         self.reset()
 
     def reset(self) -> None:
@@ -51,26 +53,26 @@ class BandBook:
     def ready(self) -> bool:
         return self.mid > 0
 
-    def _take_side(self, levels: Sequence, limit_price: float, is_bid: bool):
-        out: Dict[float, float] = {}
-        ordered: List[Level] = []
-        exhausted = True
-        last_p = 0.0
-        for lvl in levels:
-            p = float(lvl[0])
-            if (is_bid and p < limit_price) or ((not is_bid) and p > limit_price):
-                exhausted = False
-                break
-            q = float(lvl[1])
-            if q <= 0:
-                continue
-            out[p] = q
-            ordered.append((p, q))
-            last_p = p
-        # If the visible book ran out before reaching the band edge, the
-        # covered range stops at the deepest visible level.
-        if exhausted:
-            cov = last_p if last_p else limit_price
+    @staticmethod
+    def _take_side(levels: Sequence, limit_price: float, is_bid: bool):
+        # Levels are sorted best-first; find the band edge, then convert in one pass.
+        n = len(levels)
+        cut = n
+        if is_bid:
+            for i in range(n):
+                if levels[i][0] < limit_price:
+                    cut = i
+                    break
+        else:
+            for i in range(n):
+                if levels[i][0] > limit_price:
+                    cut = i
+                    break
+        ordered = [(float(l[0]), float(l[1])) for l in levels[:cut] if l[1] > 0]
+        out = dict(ordered)
+        # If the visible book ran out before the band edge, coverage stops at the deepest level.
+        if cut == n:
+            cov = ordered[-1][0] if ordered else limit_price
         else:
             cov = limit_price
         return out, ordered, cov
@@ -97,34 +99,18 @@ class BandBook:
 
         flows = None
         if self.mid > 0 and not snapshot:
-            # Diff only inside the intersection of old/new covered ranges.
-            a_lim = min(self.ask_cov_price, acov)
-            b_lim = max(self.bid_cov_price, bcov)
-            a_add = a_rem = b_add = b_rem = 0.0
-            old_a = self.asks
-            for p, q in new_a.items():
-                if p > a_lim:
-                    continue
-                d = q - old_a.get(p, 0.0)
-                if d > 0:
-                    a_add += d * p
-                elif d < 0:
-                    a_rem -= d * p
-            for p, q in old_a.items():
-                if p <= a_lim and p not in new_a:
-                    a_rem += q * p
-            old_b = self.bids
-            for p, q in new_b.items():
-                if p < b_lim:
-                    continue
-                d = q - old_b.get(p, 0.0)
-                if d > 0:
-                    b_add += d * p
-                elif d < 0:
-                    b_rem -= d * p
-            for p, q in old_b.items():
-                if p >= b_lim and p not in new_b:
-                    b_rem += q * p
+            # Diff only inside the intersection of old/new covered ranges and the
+            # (narrower) flow band around mid.
+            fb = self.flow_band
+            a_lim = min(self.ask_cov_price, acov, mid * (1.0 + fb), self.mid * (1.0 + fb))
+            b_lim = max(self.bid_cov_price, bcov, mid * (1.0 - fb), self.mid * (1.0 - fb))
+            old_a, old_b = self.asks, self.bids
+            da = [(q - old_a.get(p, 0.0)) * p for p, q in alv if p <= a_lim]
+            a_add = sum(d for d in da if d > 0)
+            a_rem = -sum(d for d in da if d < 0) + sum(q * p for p, q in self.ask_levels if p <= a_lim and p not in new_a)
+            db = [(q - old_b.get(p, 0.0)) * p for p, q in blv if p >= b_lim]
+            b_add = sum(d for d in db if d > 0)
+            b_rem = -sum(d for d in db if d < 0) + sum(q * p for p, q in self.bid_levels if p >= b_lim and p not in new_b)
             flows = (b_add, b_rem, a_add, a_rem)
 
         self.bids, self.asks = new_b, new_a

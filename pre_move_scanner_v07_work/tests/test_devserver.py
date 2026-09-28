@@ -31,7 +31,9 @@ class DevServerTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
         cls.runner.stop()
+        cls.runner.thread.join(10)
         shutil.rmtree(cls.d, ignore_errors=True)
 
     def get(self, path):

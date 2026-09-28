@@ -51,6 +51,7 @@ def main() -> int:
         return r.returncode
     finally:
         httpd.shutdown()
+        httpd.server_close()
         runner.stop()
         shutil.rmtree(tmp, ignore_errors=True)
 

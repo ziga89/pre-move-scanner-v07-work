@@ -79,7 +79,7 @@ DEFAULTS: Dict[str, Any] = {
         "backend": "ccxt",
         "workers": 1,
         "book_limit": None,
-        "book_min_interval_ms": 100,
+        "book_min_interval_ms": 250,
         "stale_book_seconds": 20,
         "stale_multiplier": 5.0,
         "trade_quiet_seconds": 600,
@@ -95,6 +95,7 @@ DEFAULTS: Dict[str, Any] = {
     "engine": {
         "tick_seconds": 1.0,
         "band_pct": 2.0,
+        "flow_band_pct": 1.0,
         "baseline_short_minutes": 30,
         "baseline_minutes": 120,
         "baseline_long_minutes": 1440,

@@ -104,13 +104,14 @@ class SecondRing:
 class PriceRing:
     """1-second last-value series (e.g. mid price), `size` seconds deep."""
 
-    __slots__ = ("size", "vals", "stamp", "last_sec")
+    __slots__ = ("size", "vals", "stamp", "last_sec", "first_sec")
 
     def __init__(self, size: int = 3600):
         self.size = int(size)
         self.vals = array("d", bytes(8 * self.size))
         self.stamp = array("q", [-1] * self.size)
         self.last_sec = -1
+        self.first_sec = -1
 
     def put(self, sec: int, value: float) -> None:
         if value is None or value <= 0:
@@ -120,9 +121,13 @@ class PriceRing:
         self.stamp[i] = sec
         if sec > self.last_sec:
             self.last_sec = sec
+        if self.first_sec < 0 or sec < self.first_sec:
+            self.first_sec = sec
 
     def at_or_before(self, sec: int, max_back: int = 120) -> Optional[float]:
         """Value at `sec`, or the nearest earlier one within `max_back` seconds."""
+        if self.first_sec < 0 or sec < max(self.first_sec, self.last_sec - self.size + 1):
+            return None  # older than anything stored: no scan needed
         for s in range(sec, sec - max_back - 1, -1):
             i = s % self.size
             if self.stamp[i] == s:

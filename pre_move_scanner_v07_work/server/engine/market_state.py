@@ -85,7 +85,7 @@ class MarketState:
         self.fcfg = fcfg
         self.discovery_volume_24h_usd = float(discovery_volume_24h_usd or 0.0)
         self.band_pct = float(ecfg.get("band_pct", 2.0))
-        self.book = BandBook(self.band_pct)
+        self.book = BandBook(self.band_pct, float(ecfg.get("flow_band_pct", 1.0)))
         self.flow = SecondRing(FLOW_FIELDS, FLOW_SECONDS)
         self.mid_ring = PriceRing(3720)
         self.minutes = MinuteRing(MINUTE_FIELDS, int(ecfg.get("baseline_long_minutes", 1440)) + 30)

@@ -143,6 +143,8 @@ class Database:
         self.applied = migrate(con)
         con.close()
         self._local = threading.local()
+        self._readers: List[sqlite3.Connection] = []   # every thread-local reader, so close() can close them all
+        self._readers_lock = threading.Lock()
         self.writer = Writer(self.path, int(self.cfg.get("writer_queue", 20000)))
         self.writer.start()
 
@@ -152,6 +154,8 @@ class Database:
         if con is None:
             con = connect(self.path)
             self._local.con = con
+            with self._readers_lock:
+                self._readers.append(con)
         return con
 
     def read_sync(self, fn: Callable[..., Any], *args, **kw) -> Any:
@@ -186,9 +190,16 @@ class Database:
 
     def close(self) -> None:
         self.writer.stop()
-        con = getattr(self._local, "con", None)
-        if con is not None:
-            con.close()
+        # Readers are opened lazily in whichever thread reads (incl. asyncio.to_thread
+        # pool threads). Close them all: open handles block file deletion on Windows.
+        with self._readers_lock:
+            readers, self._readers = self._readers, []
+        for con in readers:
+            try:
+                con.close()
+            except Exception:
+                pass
+        self._local = threading.local()
 
 
 def prune(con: sqlite3.Connection, scfg: Dict[str, Any], now: float) -> Dict[str, int]:

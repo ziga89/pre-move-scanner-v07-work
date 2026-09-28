@@ -49,6 +49,7 @@ class _Runner:
             return
         self.ready.set()
         self.loop.run_forever()
+        self.loop.close()
 
     def call(self, fn, *a, timeout: float = 30.0):
         async def wrap():
@@ -174,6 +175,7 @@ def main() -> None:
         pass
     finally:
         httpd.shutdown()
+        httpd.server_close()
         runner.stop()
 
 
