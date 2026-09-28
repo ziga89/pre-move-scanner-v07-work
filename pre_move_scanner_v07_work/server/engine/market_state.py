@@ -314,7 +314,9 @@ class MarketState:
         derive_minute(rec)
         self.minutes.append(minute_ts, rec)
         out = dict(rec)
-        out.update({"asset": self.asset, "exchange": self.exchange, "symbol": self.symbol})
+        out.update({"asset": self.asset, "exchange": self.exchange, "symbol": self.symbol,
+                    "ask_ratio": self.base.ratio("ask_depth_1", rec.get("ask_depth_1")),
+                    "bid_ratio": self.base.ratio("bid_depth_1", rec.get("bid_depth_1"))})
         self.pending_minutes.append(out)
         self._base_due = True
 
