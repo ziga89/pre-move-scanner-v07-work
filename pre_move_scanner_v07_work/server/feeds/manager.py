@@ -32,6 +32,8 @@ from ..util import chunked
 from .base import ExchangeAdapter, FeedSink, classify_error, trades_from_ccxt
 from .capabilities import ExchangeCaps, resolve_caps
 
+PIP_NAMES = {"google.protobuf": "protobuf"}   # import name -> pip package
+
 
 class Partition:
     def __init__(self, mgr: "FeedManager", ex: "ExchangeRuntime", idx: int, symbols: List[str]):
@@ -59,6 +61,8 @@ class Partition:
         self.failures: Deque[float] = deque(maxlen=200)
         self.breaker_until = 0.0
         self.single_fallback: Set[str] = set()
+        self.unmatched_msgs = 0          # updates for a symbol this partition did not subscribe (never silent)
+        self.last_unmatched = ""
         self.dirty = False
         self._rebuild_requested_gen = -1
         self._restart = asyncio.Event()
@@ -160,6 +164,8 @@ class Partition:
                 now = self.mgr.clock()
                 sym = ob.get("symbol")
                 if sym not in symbols:
+                    self.unmatched_msgs += 1
+                    self.last_unmatched = str(sym)
                     continue
                 resync = resync_all or sym not in streaming
                 sink.on_book(ex, sym, ob.get("bids") or [], ob.get("asks") or [], now, resync)
@@ -221,6 +227,9 @@ class Partition:
                 for sym, rows in trades_from_ccxt(trades).items():
                     if sym in symbols and rows:
                         sink.on_trades(ex, sym, rows, now)
+                    elif rows:
+                        self.unmatched_msgs += 1
+                        self.last_unmatched = str(sym)
                 attempt = 0
                 self.note_msg("trade")
             except asyncio.CancelledError:
@@ -299,6 +308,16 @@ class Partition:
         try:
             while True:
                 now = self.mgr.clock()
+                req = self.ex.caps.missing_requirement
+                if req:
+                    # say so explicitly instead of connecting and failing as a keepalive timeout
+                    self.state = "UNAVAILABLE"
+                    self.last_error = (f"requires the Python package '{PIP_NAMES.get(req, req)}', which is not installed "
+                                       f"(pip install -r requirements.txt)")
+                    for s in self.symbols:
+                        self.mgr.sink.on_market_status(self.ex.name, s, "UNAVAILABLE", self.last_error, now)
+                    await self.mgr.sleep(self.mgr.watchdog_interval * 12)
+                    continue
                 if self.breaker_until > now:
                     self.state = "CIRCUIT_OPEN"
                     for s in self.symbols:
@@ -363,6 +382,7 @@ class Partition:
                 "generation": self.generation, "reconnects": self.reconnects, "rebuilds": self.rebuilds,
                 "breaker_trips": self.breaker_trips, "errors": self.errors, "last_error": self.last_error,
                 "single_fallback": sorted(self.single_fallback),
+                "unmatched_msgs": self.unmatched_msgs, "last_unmatched_symbol": self.last_unmatched,
                 "breaker_open_for_s": round(max(0.0, self.breaker_until - now), 1)}
 
 

@@ -51,12 +51,13 @@ def rec(step: str, status: str, detail: str = "", data: Any = None) -> None:
 def check_packages() -> None:
     rec("1 Python", "PASS" if sys.version_info >= (3, 10) else "FAIL",
         f"{platform.python_version()} on {platform.system()} {platform.release()}")
-    for mod, critical in (("fastapi", True), ("uvicorn", True), ("httpx", False), ("ccxt", True), ("websockets", False)):
+    for mod, critical, why in (("fastapi", True, ""), ("uvicorn", True, ""), ("httpx", False, ""), ("ccxt", True, ""),
+                               ("websockets", False, ""), ("google.protobuf", False, " - MEXC streams cannot work without it")):
         try:
             m = importlib.import_module(mod)
             rec(f"1 package {mod}", "PASS", getattr(m, "__version__", "installed"))
         except Exception as exc:
-            rec(f"1 package {mod}", "FAIL" if critical else "WARN", f"not importable: {exc!r}")
+            rec(f"1 package {mod}", "FAIL" if critical else "WARN", f"not importable: {exc!r}{why}")
 
 
 def check_db(cfg) -> None:
@@ -355,12 +356,15 @@ async def stream_round(cfg, adapters, markets, fx, seconds: float, tag: str) -> 
         h = health.get(ex, {})
         parts = h.get("partitions", [])
         errs, incidents = int(h.get("errors", 0)), sum(len(st["incidents"]) for st in mk)
+        unmatched = sum(int(p.get("unmatched_msgs", 0)) for p in parts)
         last = "; ".join(sorted({p["last_error"] for p in parts if p.get("last_error")}))[:300]
         status = "FAIL" if n_ok < len(mk) else ("WARN" if errs or incidents else "PASS")
         rec(f"{tag} exchange {ex}", status,
             f"{n_ok}/{len(mk)} markets streaming; feed errors {errs}, incidents {incidents}, "
             f"client rebuilds {sum(p.get('rebuilds', 0) for p in parts)}, "
             f"breaker trips {sum(p.get('breaker_trips', 0) for p in parts)}, reconnects {h.get('reconnects', 0)}"
+            + (f", updates for unsubscribed symbols {unmatched} (last {', '.join(sorted({p['last_unmatched_symbol'] for p in parts if p.get('last_unmatched_symbol')}))})"
+               if unmatched else "")
             + (f"; last error: {last}" if last else ""), data={"health": h})
         if status != "PASS":
             bad_ex.append(f"{ex}={status}")

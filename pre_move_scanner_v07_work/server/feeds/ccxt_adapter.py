@@ -72,26 +72,50 @@ class CcxtStreamClient:
             raise StreamClientLoopError(f"{self.exchange} ccxt instance is bound to another event loop")
         self._loop = loop
 
+    @staticmethod
+    def _alias(symbol: Optional[str], requested: List[str]) -> Optional[str]:
+        """Map a symbol reported by the exchange back to the one that was subscribed.
+
+        Coinbase merged its USD and USDC books: a BASE/USDC subscription is served under
+        BASE-USD, and ccxt resolves the USDC request with a book labelled BASE/USD. Without
+        this mapping the multi-symbol loop would discard every update for the USDC market.
+        """
+        if symbol is None or symbol in requested:
+            return symbol
+        if symbol.endswith("/USD") and symbol + "C" in requested:
+            return symbol + "C"
+        if symbol.endswith("/USDC") and symbol[:-1] in requested:
+            return symbol[:-1]
+        return symbol
+
     async def watch_book(self, symbol: str, limit: Optional[int]) -> Dict[str, Any]:
         self._ready()
         ob = await (self.ex.watch_order_book(symbol, limit) if limit else self.ex.watch_order_book(symbol))
-        return {"symbol": ob.get("symbol", symbol), "bids": ob["bids"], "asks": ob["asks"],
+        return {"symbol": self._alias(ob.get("symbol") or symbol, [symbol]), "bids": ob["bids"], "asks": ob["asks"],
                 "nonce": ob.get("nonce"), "timestamp": ob.get("timestamp")}
 
     async def watch_books(self, symbols: List[str], limit: Optional[int]) -> Dict[str, Any]:
         self._ready()
         ob = await (self.ex.watch_order_book_for_symbols(symbols, limit) if limit
                     else self.ex.watch_order_book_for_symbols(symbols))
-        return {"symbol": ob.get("symbol"), "bids": ob["bids"], "asks": ob["asks"],
+        return {"symbol": self._alias(ob.get("symbol"), symbols), "bids": ob["bids"], "asks": ob["asks"],
                 "nonce": ob.get("nonce"), "timestamp": ob.get("timestamp")}
+
+    def _alias_trades(self, trades, symbols: List[str]) -> List[Dict[str, Any]]:
+        out = []
+        for t in trades or []:
+            s = t.get("symbol")
+            a = self._alias(s, symbols)
+            out.append(t if a == s else dict(t, symbol=a))
+        return out
 
     async def watch_trades(self, symbol: str) -> List[Dict[str, Any]]:
         self._ready()
-        return await self.ex.watch_trades(symbol)
+        return self._alias_trades(await self.ex.watch_trades(symbol), [symbol])
 
     async def watch_trades_multi(self, symbols: List[str]) -> List[Dict[str, Any]]:
         self._ready()
-        return await self.ex.watch_trades_for_symbols(symbols)
+        return self._alias_trades(await self.ex.watch_trades_for_symbols(symbols), symbols)
 
     async def close(self) -> None:
         if self.closed:

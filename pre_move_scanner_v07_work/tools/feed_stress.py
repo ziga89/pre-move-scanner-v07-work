@@ -2,6 +2,7 @@
 
     python tools/feed_stress.py                                   # KuCoin, QNT/XDC/LINK, 12 cycles
     python tools/feed_stress.py --exchange kucoin --assets QNT,XDC,LINK --cycles 20 --hold 20
+    python tools/feed_stress.py --exchange coinbase --symbols LINK/USDC,SOL/USDC,ETH/USD --cycles 6
 
 Uses the production path: the exchange catalog is loaded over REST and its markets are
 shared into every stream client (this is what exposed the KuCoin
@@ -20,7 +21,7 @@ Failures are never masked: a cycle FAILs if a market does not stream again withi
 timeout, delivers no books, or ANY client-level error occurs (AttributeError, TypeError,
 closed / wrong-loop client). Transient disconnects caused by drop_sockets are expected and
 reported. Step 0 probes the raw ccxt behaviour (shared markets without open()).
-Writes data/feed_stress_report.md and data/feed_stress_report.json; exit code 1 on any FAIL.
+Writes data/feed_stress_<exchange>.md and .json; exit code 1 on any FAIL.
 """
 from __future__ import annotations
 
@@ -159,10 +160,15 @@ async def run(args) -> int:
         return 1
     report["catalog"] = f"{len(cat.markets)} spot pairs, {len(cat.tickers)} tickers in {time.time() - t0:.1f}s"
     print(f"[PASS] catalog {ex}: {report['catalog']}")
-    chosen = pick_symbols(cat, assets)
+    if args.symbols:
+        req = [x.strip() for x in args.symbols.split(",") if x.strip()]
+        chosen = {s: s for s in req if s in cat.markets}
+        missing = [s for s in req if s not in cat.markets]
+    else:
+        chosen = pick_symbols(cat, assets)
+        missing = [a for a in assets if a not in chosen]
     symbols = list(chosen.values())
     report["symbols"] = chosen
-    missing = [a for a in assets if a not in chosen]
     if missing:
         print(f"[WARN] not listed on {ex}: {missing}")
     if not symbols:
@@ -260,14 +266,15 @@ async def run(args) -> int:
     write(report)
     counts = {r: sum(1 for c in report["cycles"] if c["result"] == r) for r in ("PASS", "WARN", "FAIL")}
     print(f"\n{ex}: {counts['PASS']} PASS, {counts['WARN']} WARN, {counts['FAIL']} FAIL of {len(report['cycles'])} cycles "
-          f"-> {report['result']}. Report: data/feed_stress_report.md")
+          f"-> {report['result']}. Report: data/feed_stress_{ex}.md")
     return 1 if failures else 0
 
 
 def write(report: Dict[str, Any]) -> None:
     out = ROOT / "data"
     out.mkdir(exist_ok=True)
-    (out / "feed_stress_report.json").write_text(json.dumps(report, indent=1, default=str))
+    name = f"feed_stress_{report['exchange']}"
+    (out / f"{name}.json").write_text(json.dumps(report, indent=1, default=str))
     lines = [f"# Feed stress test: {report['exchange']}", "",
              f"{time.strftime('%Y-%m-%d %H:%M:%S')} · {report.get('platform')} · Python {report.get('python')} · "
              f"ccxt {report.get('ccxt')} · scanner v{report.get('version')}", "",
@@ -281,7 +288,7 @@ def write(report: Dict[str, Any]) -> None:
         lines.append(f"| {c['cycle']} | {c['op']} | {c['result']} | {c['recovery_s']} s | {sum(c['books'].values())} | "
                      f"{sum(c['trades'].values())} | {c['generations']} | {c['rebuilds']} | {c['breaker_trips']} | {len(c['incidents'])} | "
                      f"{'; '.join(c['problems']).replace('|', '/')} |")
-    (out / "feed_stress_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out / f"{name}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -292,6 +299,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--exchange", default="kucoin")
     ap.add_argument("--assets", default="QNT,XDC,LINK")
+    ap.add_argument("--symbols", default="", help="exact unified symbols instead of --assets, e.g. LINK/USDC,SOL/USDC")
     ap.add_argument("--cycles", type=int, default=12)
     ap.add_argument("--hold", type=float, default=15.0, help="seconds of streaming measured per cycle")
     ap.add_argument("--timeout", type=float, default=60.0, help="seconds allowed to get every market streaming again")

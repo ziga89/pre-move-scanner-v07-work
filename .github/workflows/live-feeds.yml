@@ -37,6 +37,10 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Live KuCoin stress - 12 cycles of start / resubscribe / stop-start / socket drop / rebuild / new manager
         run: python tools/feed_stress.py --exchange kucoin --assets QNT,XDC,LINK --cycles 12 --hold 15
+      - name: Live Coinbase stress - USDC pairs served under their USD alias
+        run: python tools/feed_stress.py --exchange coinbase --symbols LINK/USDC,SOL/USDC,ETH/USD --cycles 6 --hold 10
+      - name: Live MEXC stress - protobuf stream
+        run: python tools/feed_stress.py --exchange mexc --assets XDC,BTC,ETH --cycles 6 --hold 10
       - name: Live self-test, KuCoin markets, 3 rounds
         continue-on-error: true   # steps 4-8 depend on CoinGecko / other exchanges; KuCoin is checked below
         run: |

@@ -19,6 +19,7 @@ per-symbol mode for that chunk so one bad symbol cannot take the rest down.
 """
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional
 
@@ -39,7 +40,8 @@ STATIC_POLICY: Dict[str, Dict[str, Any]] = {
                   "notes": "topic limits per connection and per subscribe message"},
     "gate":      {"multi": True,  "per_conn": 50,  "per_call": 20, "pace_s": 0.10, "book_limit": None, "notes": ""},
     "mexc":      {"multi": False, "per_conn": 15,  "per_call": 1,  "pace_s": 0.15, "book_limit": None,
-                  "notes": "≈30 subscriptions per connection"},
+                  "requires": "google.protobuf",   # ccxt decodes MEXC's spot stream as protobuf
+                  "notes": "≈30 subscriptions per connection; binary protobuf stream"},
     "bitget":    {"multi": True,  "per_conn": 50,  "per_call": 20, "pace_s": 0.10, "book_limit": None,
                   "notes": "recommended < 50 channels per connection"},
     "htx":       {"multi": False, "per_conn": 50,  "per_call": 1,  "pace_s": 0.10, "book_limit": None, "notes": "gzip frames"},
@@ -72,6 +74,7 @@ class ExchangeCaps:
     notes: str = ""
     verified: bool = False
     runtime_has: Dict[str, Any] = field(default_factory=dict)
+    missing_requirement: str = ""     # Python module the exchange's stream needs but is not installed
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -79,6 +82,13 @@ class ExchangeCaps:
 
 def _truthy(v: Any) -> bool:
     return v is True or v == "emulated"
+
+
+def module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):   # parent package missing
+        return False
 
 
 def resolve_caps(exchange: str, has: Optional[Dict[str, Any]], overrides: Optional[Dict[str, Any]] = None
@@ -109,4 +119,9 @@ def resolve_caps(exchange: str, has: Optional[Dict[str, Any]], overrides: Option
         runtime_has={k: has.get(k) for k in ("watchOrderBookForSymbols", "watchOrderBook",
                                               "watchTradesForSymbols", "watchTrades", "fetchTickers")},
     )
+    req = ov.get("requires", pol.get("requires"))
+    if req and not module_available(req):
+        # Without it ccxt's message handler raises inside its receive callback, the socket is never
+        # read again and the stream only shows up as a ping-pong keepalive timeout.
+        caps.missing_requirement = req
     return caps
