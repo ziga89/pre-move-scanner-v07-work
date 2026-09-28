@@ -1,0 +1,9 @@
+# Wallet labels used by wallet intelligence. One row per address.
+# Only add labels you trust (explorer tags, entity disclosures, your own research).
+#   chain:        ethereum | bsc | polygon | arbitrum | optimism | base | avalanche | ...
+#   entity_type:  CEX_HOT | CEX_COLD | CEX_DEPOSIT | CEX_CUSTODY | MM | WHALE | CUSTODY_INSTITUTIONAL |
+#                 PROTOCOL_TREASURY | DEX_POOL | DEX_ROUTER | BRIDGE | WATCH
+#   confidence:   HIGH | MEDIUM | LOW   (LOW and WATCH rows are shown but never drive scores)
+# Lines starting with # are ignored.
+chain,address,entity,entity_type,confidence,source,notes
+ethereum,0xf8191d98ae98d2f7abdfb63a9b0b812b93c873aa,Wintermute,MM,MEDIUM,v0.6 config.example.json,QNT research (v0.6 watch wallet)
