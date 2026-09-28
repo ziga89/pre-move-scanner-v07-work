@@ -1,0 +1,9 @@
+{
+  "name": "Pre-Move Scanner",
+  "short_name": "PreMove",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0f14",
+  "theme_color": "#0b0f14",
+  "description": "Real-time crypto order-book and flow anomaly scanner"
+}

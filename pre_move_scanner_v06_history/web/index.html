@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f14">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="stylesheet" href="/static/styles.css">
+  <title>Pre‑Move Scanner v0.4</title>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Pre‑Move Scanner <span class="vtag">v0.4</span></h1>
+    <p>Per‑coin Top‑5 volume composite · venues discovered automatically</p>
+  </div>
+  <div class="status"><span id="dot"></span><span id="connection">connecting…</span></div>
+</header>
+<section class="explain">
+  <div><b>One coin = one signal.</b> For each coin, the scanner automatically chooses its highest‑volume supported spot markets.</div>
+  <div class="legend"><span>0–39 normal</span><span>40–54 interesting</span><span>55–69 watch</span><span>70–79 strong</span><span>80+ extreme</span></div>
+</section>
+<main>
+  <div id="cards" class="cards"></div>
+
+  <section class="panel history-panel">
+    <div class="history-head">
+      <div>
+        <h2>Market history</h2>
+        <div id="history-subtitle" class="muted">Click a coin card to inspect its history.</div>
+      </div>
+      <div class="range-buttons">
+        <button data-hours="1">1h</button>
+        <button data-hours="6" class="active">6h</button>
+        <button data-hours="24">24h</button>
+        <button data-hours="168">7d</button>
+      </div>
+    </div>
+
+    <div class="history-grid">
+      <div class="chartbox">
+        <div class="charttitle">Price</div>
+        <canvas id="chart-price"></canvas>
+      </div>
+      <div class="chartbox">
+        <div class="charttitle">Pre‑Move score</div>
+        <canvas id="chart-score"></canvas>
+      </div>
+      <div class="chartbox">
+        <div class="charttitle">Liquidity / buying pressure</div>
+        <canvas id="chart-flow"></canvas>
+      </div>
+      <div class="chartbox">
+        <div class="charttitle">Volume / venue confirmations</div>
+        <canvas id="chart-volume"></canvas>
+      </div>
+    </div>
+
+    <div class="panel history-details">
+      <h2>Venue history</h2>
+      <div id="venue-history-legend" class="muted">No coin selected.</div>
+      <canvas id="chart-venues"></canvas>
+    </div>
+
+    <div class="panel">
+      <h2>Detected events</h2>
+      <div id="history-events" class="muted">No events yet.</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Known-wallet flows</h2>
+    <div id="onchain-status" class="muted">Optional.</div>
+    <div id="flows"></div>
+  </section>
+  <section class="panel">
+    <h2>Composite logic</h2>
+    <p>
+      The score is liquidity-weighted across the major spot venues. A tiny exchange cannot create a
+      high score by itself. Strong scores require the same type of anomaly to appear across multiple
+      venues while the price has not already escaped.
+    </p>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+{
+  "watchlist": [
+    "QNT",
+    "LINK",
+    "XDC"
+  ],
+  "coingecko_ids": {
+    "QNT": "quant-network",
+    "LINK": "chainlink",
+    "XDC": "xdc-network"
+  },
+  "venue_discovery": {
+    "enabled": true,
+    "max_venues_per_asset": 5,
+    "candidate_markets": 20,
+    "exclude_stale": true,
+    "exclude_anomaly": true,
+    "cache_minutes": 30
+  },
+  "sample_interval_seconds": 1,
+  "persist_interval_seconds": 5,
+  "baseline_minutes": 120,
+  "warmup_minutes": 30,
+  "onchain": {
+    "enabled": false,
+    "etherscan_api_key_env": "ETHERSCAN_API_KEY",
+    "poll_seconds": 15,
+    "assets": {
+      "QNT": {
+        "contract": "0x4a220E6096B25EADb88358cb44068A3248254675",
+        "watch_wallets": {
+          "Wintermute": "0xf8191d98ae98d2f7abdfb63a9b0b812b93c873aa"
+        }
+      }
+    }
+  }
+}
