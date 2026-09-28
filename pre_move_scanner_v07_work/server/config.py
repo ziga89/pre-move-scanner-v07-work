@@ -88,6 +88,7 @@ DEFAULTS: Dict[str, Any] = {
         "breaker_failures": 6,
         "breaker_window_seconds": 300,
         "breaker_cooldown_seconds": 300,
+        "watchdog_min_seconds": 60.0,
         "exchange_overrides": {},
     },
     "engine": {
