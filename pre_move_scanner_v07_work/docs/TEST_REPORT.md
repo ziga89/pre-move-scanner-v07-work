@@ -1,5 +1,65 @@
 # v0.7 test report
 
+## v0.7.1: KuCoin stream fix, verified against the real exchanges
+
+**Your report:** some live self-test runs lost every KuCoin stream with
+`AttributeError: 'NoneType' object has no attribute 'create_task'`, while the KuCoin catalog loaded fine.
+
+**Root cause** (reproduced with the real ccxt 4.5.84, locally and live): the scanner shares the catalog's
+markets with each stream client (`set_markets`), so ccxt never makes a REST request and never runs `open()`,
+the call that binds an instance to the event loop. KuCoin's watchers call `negotiate()` → `spawn()` →
+`self.asyncio_loop.create_task()` before anything opens the instance. It failed **every time KuCoin was
+streamed**. It looked intermittent because whether KuCoin is among a coin's selected venues depends on
+live volumes. The scanner then made it worse: the error counted as transient, the broken instance was
+retried until the circuit breaker opened for every KuCoin market, and the summary still said PASS at
+≥ 80 %. Fix and details: `CHANGELOG.md` (v0.7.1).
+
+### Live runs: GitHub Actions, real exchanges, Windows and Ubuntu runners (2 each)
+
+Workflow `.github/workflows/live-feeds.yml`, commit 905227e. The runners are in US data centres.
+
+| Check | Result |
+|---|---|
+| Raw ccxt KuCoin, shared markets, no `open()` | `AttributeError: 'NoneType' object has no attribute 'create_task'` on **all 4 runners** (root cause reproduced live) |
+| `tools/feed_stress.py`, KuCoin QNT/XDC/LINK, 12 cycles per runner: start, resubscribe, stop/start, socket drop, client rebuild, new manager | **48 / 48 cycles PASS**. 0 client errors, 0 error rebuilds, 0 breaker trips; every market delivers new books after every operation |
+| Live self-test, KuCoin markets, `--repeat 3` | **12 / 12 rounds clean**: 3/3 markets, 0 feed errors, 0 incidents |
+| Full live self-test, all exchanges, `--repeat 2` | **8 / 8 rounds with every selected market streaming** (34–35 markets on 10 exchanges). 7 rounds fully clean; 1 WARN (HTX `InvalidNonce` resync on XDC/USDT, recovered, reported as WARN) |
+| Coinbase `LINK/USDC`, `SOL/USDC`, `ETH/USD` stress, 6 cycles per runner | **24 / 24 PASS** (USDC alias fix) |
+| MEXC XDC/BTC/ETH stress, 6 cycles per runner | **24 / 24 PASS** (with `protobuf`) |
+
+The first live run (commit fd150d4, before the Coinbase / MEXC fixes) had the same KuCoin result: 48/48
+cycles and 12/12 rounds. Its full self-test FAILed MEXC on every runner and Coinbase USDC pairs on Windows,
+which the old ≥ 80 % summary would have hidden. Both were real bugs, fixed in the same release (see the
+changelog).
+
+Not the scanner's fault, and they need your machine: Binance (HTTP 451) and Bybit (HTTP 403) refuse US
+runners, so those two were not live-tested. Bitrue has no trade stream in ccxt (`NotSupported`); its
+books stream.
+
+### Offline regression tests added in v0.7.1 (run in CI on Windows + Ubuntu × Python 3.11–3.13)
+
+| File | What it proves |
+|---|---|
+| `tests/test_kucoin_lifecycle.py` (10, no ccxt) | a model of ccxt's KuCoin lifecycle reproduces the error; the stream client opens before the first watch, refuses reuse after close or from another loop, closes once; a client error rebuilds once (RECONNECTING, never UNAVAILABLE); a persistent client error backs off and is reported; **one failing market cannot take down the others**; **60-cycle start / stop stress** with injected faults: no leaked tasks, no use of a closed client, one open instance at most |
+| `tests/test_kucoin_ccxt_local.py` (4, real ccxt) | the real ccxt KuCoin code against a local fake KuCoin server (token REST, snapshot REST, websocket): reproduction, books + trades, bad-symbol isolation, **18-cycle start / stop / drop / token-expiry stress**. It also passes with 0.5 s of added REST latency |
+| `tests/test_exchange_quirks.py` (4) | Coinbase USDC-alias updates reach the USDC market; unrequested symbols are counted; missing `protobuf` is reported for MEXC without connecting |
+| `tests/test_selftest_tool.py` (1) | injected feed incidents make the market, exchange and summary lines WARN, never PASS |
+
+On the unfixed code, 9 of the 10 lifecycle tests and 3 of the 4 real-ccxt tests fail. The remaining one in
+each file only checks that the harness reproduces the bug.
+
+Totals: **143 tests**. Here: 136 run + 7 skipped without FastAPI / ccxt, and 142 + 1 skipped with a
+local real-ccxt harness. In CI all 143 run, on 6 OS / Python combinations.
+
+### Still for your Windows machine
+
+`run_windows.bat selftest --repeat 3` (and `run_windows.bat stress` for KuCoin) from your own network
+and IP location, including Binance and Bybit, plus a longer live run.
+
+---
+
+## v0.7.0 report
+
 The build environment had **no network access to market data**: PyPI, CoinGecko, every exchange and
 Etherscan returned HTTP 403. To make up for that, the core is pure-stdlib (it runs without PyPI). A
 synthetic multi-exchange market (`server/sim.py`) and recorded-format fixtures stand in for live data.

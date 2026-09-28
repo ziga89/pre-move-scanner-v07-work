@@ -1,11 +1,26 @@
 # Known limitations, unsupported exchanges / chains, data-source assumptions
 
-## Not yet verified against live markets
-The build environment had no access to CoinGecko, the exchanges or Etherscan. Everything was verified
-with fixtures and the synthetic SIM market, plus GitHub Actions (which installs the real ccxt / FastAPI but
-makes no exchange connections). **Live behaviour must be confirmed with `run_windows.bat selftest`** —
-especially per-exchange websocket limits (the capability matrix values are documented assumptions,
-marked "unverified" in the Health page) and real message rates.
+## Live verification so far
+Since v0.7.1 the feeds are tested live from GitHub's Windows and Ubuntu runners (`live-feeds.yml`, see
+`docs/TEST_REPORT.md`). All selected markets streamed on KuCoin, Coinbase, OKX, Kraken, Gate, MEXC, HTX,
+Upbit, Bitfinex and Bitrue, including repeated start / stop / reconnect stress on KuCoin, Coinbase and MEXC.
+Not covered there:
+* **Binance (HTTP 451) and Bybit (HTTP 403) refuse US data centres**, so they were never live-tested.
+  Run `run_windows.bat selftest --repeat 3` from your own network.
+* Per-exchange connection limits are still conservative assumptions (Health page: "unverified"). The live
+  runs used a few markets per exchange, not the full Top-100 load.
+* Multi-hour behaviour: token expiry, exchange maintenance, memory and database growth.
+
+## Exchange-specific behaviour handled in code
+* **KuCoin**: the ccxt instance must be bound to the event loop before the first watch (fixed in 0.7.1).
+* **Coinbase** serves `BASE/USDC` under `BASE-USD`. The updates are mapped back to the subscribed USDC
+  market (0.7.1).
+* **MEXC**: ccxt decodes the spot stream as protobuf, so the `protobuf` package is required (in
+  `requirements.txt`). Without it, MEXC markets are marked UNAVAILABLE with that reason.
+* **Bitrue** has no trade stream in ccxt (`NotSupported`). Books stream, but trade-based signals are missing
+  for Bitrue markets.
+* **HTX** occasionally fails to line up its order-book snapshot (`InvalidNonce`). The loop resyncs and it
+  is reported as an incident (seen once in 8 live rounds).
 
 ## Market microstructure
 * **Cancellations are a proxy**: removed ask liquidity minus aggressive buy notional. Hidden / iceberg

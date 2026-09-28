@@ -32,6 +32,12 @@ jobs:
         run: python tools/print_capabilities.py
       - name: Self-test tool, offline SIM mode
         run: python tools/selftest.py --sim --seconds 8
+      - name: Windows launcher end-to-end (venv, pip, comma arguments, exit code)
+        if: runner.os == 'Windows' && matrix.python == '3.12'
+        shell: cmd
+        env:
+          PMS_NO_PAUSE: "1"
+        run: run_windows.bat selftest --sim --seconds 4 --repeat 2 --assets QNT,XDC,LINK
 
   web:
     name: web UI (JS syntax, lint, headless browser)

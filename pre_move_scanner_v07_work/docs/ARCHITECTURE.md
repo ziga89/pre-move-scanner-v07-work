@@ -28,6 +28,21 @@ web/                           Top table, coin detail, health, universe (vanilla
 4. **Persistence** via the writer thread (5 s asset rows, 10 s venue rows, 1-minute rollups, events,
    outcomes); **broadcast** of the compact top table (1 Hz) and the open coin (2 s).
 
+## Feed client lifecycle (v0.7.1)
+
+* One partition = one ccxt.pro instance = one client **generation**. The instance is created inside the
+  running event loop (`asyncio_loop` option) and opened before its first watch. Every loop is bound to its
+  generation, and an instance is closed exactly once, before the next one is created.
+* Error classes: **permanent** (bad symbol / not supported → that market UNAVAILABLE, multi-symbol chunks
+  fall back to per-symbol loops); **client** (the instance is unusable: AttributeError, TypeError, closed or
+  wrong-loop client → one rebuild per generation, with backoff; markets RECONNECTING); **transient**
+  (network → per-loop exponential backoff).
+* The circuit breaker opens only when the partition delivers no data at all, so a failing market never
+  takes down healthy ones. The watchdog replaces a partition whose order books stay silent.
+* Exchange quirks are handled in `CcxtStreamClient`: Coinbase USD↔USDC aliases are mapped back to the
+  subscribed symbol. Updates for symbols that weren't requested are counted, never dropped silently. A
+  missing stream dependency (MEXC: `protobuf`) is reported as UNAVAILABLE with the reason.
+
 ## Requirement → implementation map
 
 | Requirement | Where |

@@ -20,6 +20,9 @@
 |---|---|
 | `run_windows.bat` | live scanner, port 8000 (LAN devices: `http://YOUR-PC-IP:8000`) |
 | `run_windows.bat selftest [--assets QNT,XDC,LINK] [--seconds 120]` | live self-test + report |
+| `run_windows.bat selftest --repeat 3` | three streaming rounds (fresh feed manager each). A market PASSes only with zero feed incidents |
+| `run_windows.bat selftest --assets QNT,XDC,LINK --exchanges kucoin --repeat 3` | stream only one exchange's markets (adds each asset's best pair there) |
+| `run_windows.bat stress [--exchange kucoin] [--assets QNT,XDC,LINK] [--cycles 20]` | live start / resubscribe / stop-start / socket-drop / rebuild stress → `data\feed_stress_<exchange>.md` |
 | `run_windows.bat sim` | offline demo with synthetic markets (port 8001, separate `data\scanner_sim.db`) |
 | `run_windows.bat import "C:\...\scanner.db"` | read-only import of v0.6 history |
 | `run_windows.bat test` | automated test-suite |

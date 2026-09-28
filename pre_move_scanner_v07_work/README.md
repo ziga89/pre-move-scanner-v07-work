@@ -12,7 +12,8 @@ momentum scanner — coins that have already moved are pushed down and labelled 
 
 1. Install **Python 3.11+** from python.org (tick *Add python.exe to PATH*).
 2. Double-click **`run_windows.bat`**, then open <http://127.0.0.1:8000>.
-3. Before relying on it, run the live self-test once: `run_windows.bat selftest` → `data\selftest_report.md`.
+3. Before relying on it, run the live self-test: `run_windows.bat selftest --repeat 3` → `data\selftest_report.md`
+   (optional live KuCoin stress test: `run_windows.bat stress`).
 
 Other actions: `run_windows.bat sim` (offline demo, synthetic markets, port 8001) ·
 `run_windows.bat import "C:\path\to\v0.6\scanner.db"` (read-only import of v0.6 history) ·

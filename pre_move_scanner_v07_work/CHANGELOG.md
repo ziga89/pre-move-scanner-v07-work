@@ -23,6 +23,10 @@
   protobuf but does not install it. The `NotSupported` error escapes ccxt's receive callback and the socket
   is never read again. `requirements.txt` now includes `protobuf==5.29.5`. If the package is missing, MEXC
   markets are `UNAVAILABLE` with that reason instead of timing out, and the self-test checks for it.
+* **`run_windows.bat` mangled options.** It passed only four arguments, and cmd splits on commas, so
+  `selftest --assets QNT,XDC,LINK` reached the self-test as `--assets QNT XDC LINK`. Everything after the
+  action is now passed on unchanged. The exit code is returned, there is a new `stress` action, and
+  `PMS_NO_PAUSE=1` skips the prompts. CI runs the launcher on a Windows runner.
 
 ### Changed
 * `CcxtStreamClient` binds its ccxt instance to the running loop (`asyncio_loop` option plus an explicit

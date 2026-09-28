@@ -6,9 +6,20 @@ title Pre-Move Scanner v0.7
 rem  Usage:
 rem    run_windows.bat                 start the live scanner  (http://127.0.0.1:8000)
 rem    run_windows.bat selftest        live self-test: universe, venues, websockets  (writes data\selftest_report.md)
+rem        options, e.g.:  selftest --repeat 3          three streaming rounds
+rem                        selftest --assets QNT,XDC,LINK --exchanges kucoin --repeat 3
+rem    run_windows.bat stress          live start/stop/reconnect stress test of one exchange (default KuCoin)
+rem        options, e.g.:  stress --exchange kucoin --assets QNT,XDC,LINK --cycles 20
 rem    run_windows.bat sim             offline demo with synthetic markets
 rem    run_windows.bat import "C:\path\to\v0.6\scanner.db"   read-only import of v0.6 history
 rem    run_windows.bat test            run the automated test-suite
+rem  Everything after the action is passed on unchanged (commas included).
+rem  Set PMS_NO_PAUSE=1 to skip the "press any key" prompts (automation).
+
+set "RC=0"
+rem  (single lines, not a parenthesised block: a ")" in a path must not end the block)
+set "ARGS=%*"
+if defined ARGS call set "ARGS=%%ARGS:*%1=%%"
 
 set "PY=.venv\Scripts\python.exe"
 if not exist "%PY%" (
@@ -29,6 +40,7 @@ if not exist "config.json" (
 if not exist "data" mkdir "data"
 
 if /I "%~1"=="selftest" goto :selftest
+if /I "%~1"=="stress" goto :stress
 if /I "%~1"=="sim" goto :sim
 if /I "%~1"=="import" goto :import
 if /I "%~1"=="test" goto :test
@@ -42,10 +54,19 @@ echo.
 goto :end
 
 :selftest
-"%PY%" tools\selftest.py %2 %3 %4 %5
+"%PY%" tools\selftest.py %ARGS%
+set "RC=%ERRORLEVEL%"
 echo.
 echo Report: data\selftest_report.md
-pause
+if not defined PMS_NO_PAUSE pause
+goto :end
+
+:stress
+"%PY%" tools\feed_stress.py %ARGS%
+set "RC=%ERRORLEVEL%"
+echo.
+echo Report: data\feed_stress_^<exchange^>.md
+if not defined PMS_NO_PAUSE pause
 goto :end
 
 :sim
@@ -60,27 +81,31 @@ if "%~2"=="" (
   goto :end
 )
 "%PY%" tools\import_v06.py "%~2"
-pause
+set "RC=%ERRORLEVEL%"
+if not defined PMS_NO_PAUSE pause
 goto :end
 
 :test
 "%PY%" -m pip install --disable-pip-version-check -q -r requirements-dev.txt
 "%PY%" -m unittest discover -s tests -t . -v
-pause
+set "RC=%ERRORLEVEL%"
+if not defined PMS_NO_PAUSE pause
 goto :end
 
 :nopython
 echo.
 echo Could not create a Python virtual environment.
 echo Install Python 3.11 or newer from https://www.python.org/downloads/ and tick "Add python.exe to PATH".
-pause
+set "RC=1"
+if not defined PMS_NO_PAUSE pause
 goto :end
 
 :piperror
 echo.
 echo Installing dependencies failed. Check your internet connection and the messages above.
 echo Tip: delete the .venv folder and run this file again.
-pause
+set "RC=1"
+if not defined PMS_NO_PAUSE pause
 
 :end
-endlocal
+endlocal & exit /b %RC%
