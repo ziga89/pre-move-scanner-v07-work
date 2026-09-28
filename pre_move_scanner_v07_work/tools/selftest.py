@@ -183,8 +183,10 @@ async def run(args) -> int:
             (detail or "no usable venue") + (f" | rejected: {rej}" if rej else "") +
             (f" | not listed on: {', '.join(sorted(set(good) - set(listed)))}" if len(listed) < len(good) else ""))
 
-    if not args.quick and selections:
-        await stream_check(cfg, adapters, selections, fx, args.seconds)
+    if not args.quick:
+        only = [x.strip().lower() for x in args.exchanges.split(",") if x.strip()]
+        markets = stream_markets(selections, good, fx, examples, only)
+        await stream_check(cfg, adapters, markets, fx, args.seconds, args.repeat)
     if cfg["intel"].get("enabled") or os.getenv(cfg["intel"].get("etherscan_api_key_env", "ETHERSCAN_API_KEY")):
         await etherscan_check(cfg, http)
     else:
@@ -233,21 +235,78 @@ async def run_sim(cfg, args, http) -> int:
         rec(f"8 venues {r['symbol'].upper()}", "PASS" if sel.selected else "FAIL",
             "; ".join(f"{m['exchange']} {m['symbol']}" for m in sel.selected))
     if not args.quick:
-        await stream_check(cfg, adapters, selections, fx, min(args.seconds, 10.0))
+        markets = stream_markets(selections, good, fx, list(selections), [])
+        await stream_check(cfg, adapters, markets, fx, min(args.seconds, 10.0), args.repeat)
     dtask.cancel()
     await http.close()
     return finish()
 
 
-async def stream_check(cfg, adapters, selections, fx, seconds: float) -> None:
+INCIDENT_STATES = ("DISCONNECTED", "RECONNECTING", "CIRCUIT_OPEN", "UNAVAILABLE")
+RANK = {"PASS": 0, "SKIP": 0, "WARN": 1, "FAIL": 2}
+
+
+def stream_markets(selections, good, fx, examples, only) -> List[tuple]:
+    """(asset, exchange, symbol, quote, volume_usd, why) to stream.
+
+    The per-coin venue selection, restricted to `only` exchanges when given. With `only`, each
+    example asset's best pair on each listed exchange is added even when that exchange is not
+    among the coin's top venues (or CoinGecko was unavailable), so the exchange is always tested.
+    """
+    out = []
+    for sym, sel in selections.items():
+        for m in sel.selected:
+            if not only or m["exchange"] in only:
+                out.append((sym, m["exchange"], m["symbol"], m["quote"], m["volume_24h_usd"], "selected"))
+    have = {(a, e) for a, e, *_ in out}
+    for sym in examples if only else []:
+        for ex in only:
+            cat = good.get(ex)
+            if cat is None or (sym, ex) in have:
+                continue
+            best = None
+            for s in cat.by_base.get(sym, []):
+                q = str(cat.markets[s].get("quote", "")).upper()
+                rate, t = fx.rate(q), cat.tickers.get(s) or {}
+                if not rate or not t.get("last"):
+                    continue
+                vol = float(t.get("quoteVolume") or 0.0) * rate
+                if best is None or vol > best[4]:
+                    best = (sym, ex, s, q, round(vol, 2), "forced")
+            if best:
+                out.append(best)
+            else:
+                rec(f"9 stream {ex} {sym}", "WARN", f"{sym} is not listed on {ex} (or has no USD-convertible ticker)")
+    return out
+
+
+async def stream_check(cfg, adapters, markets, fx, seconds: float, repeat: int = 1) -> None:
+    if not markets:
+        rec("9 realtime", "WARN", "no markets to stream")
+        return
+    results = []
+    for rnd in range(1, max(1, repeat) + 1):
+        if repeat > 1:
+            print(f"... round {rnd}/{repeat}", flush=True)
+        results.append(await stream_round(cfg, adapters, markets, fx, seconds, "9" if repeat <= 1 else f"9.{rnd}"))
+    if repeat > 1:
+        worst = max(results, key=RANK.get)
+        rec("9 repeat summary", worst, f"{results.count('PASS')}/{len(results)} rounds clean (every market streaming, "
+            f"no feed errors); rounds: {', '.join(results)}")
+
+
+async def stream_round(cfg, adapters, markets, fx, seconds: float, tag: str) -> str:
+    """Stream the markets through the real feed manager + engine. Every feed incident is recorded:
+    a market PASSes only if it streamed books and trades without a single incident."""
     from server.engine.host import LocalEngineHost, MarketSpec
-    specs = [MarketSpec(sym, m["exchange"], m["symbol"], m["quote"], m["volume_24h_usd"])
-             for sym, sel in selections.items() for m in sel.selected]
+    specs = [MarketSpec(a, ex, s, q, v) for a, ex, s, q, v, _ in markets]
+    why = {(ex, s): w for _, ex, s, _, _, w in markets}
     host = LocalEngineHost(cfg, adapters, fx.rate)
-    stats: Dict[tuple, Dict[str, Any]] = {(s.exchange, s.symbol): {"books": 0, "trades": 0, "first_book": None,
-                                                                    "status": [], "asset": s.asset} for s in specs}
+    stats: Dict[tuple, Dict[str, Any]] = {(s.exchange, s.symbol): {"books": 0, "trades": 0, "first_book": None, "asset": s.asset,
+                                                                    "status": [], "incidents": []} for s in specs}
     t0 = time.time()
-    orig_book, orig_trades, orig_status = host.on_book, host.on_trades, host.on_market_status
+    orig_book, orig_trades = host.on_book, host.on_trades
+    orig_status = host.feeds._orig_sink_status   # the feed manager binds its status sink at construction
 
     def on_book(ex, sym, b, a, ts, resync):
         st = stats.get((ex, sym))
@@ -264,32 +323,52 @@ async def stream_check(cfg, adapters, selections, fx, seconds: float) -> None:
 
     def on_status(ex, sym, status, reason, ts):
         st = stats.get((ex, sym))
-        if st is not None and (not st["status"] or st["status"][-1][0] != status):
-            st["status"].append((status, reason[:120]))
+        if st is not None:
+            if not st["status"] or st["status"][-1] != status:
+                st["status"].append(status)
+            if status in INCIDENT_STATES:
+                st["incidents"].append(f"{status}: {reason}"[:200])
         orig_status(ex, sym, status, reason, ts)
-    host.on_book, host.on_trades, host.on_market_status = on_book, on_trades, on_status
+    host.on_book, host.on_trades = on_book, on_trades
+    host.feeds._orig_sink_status = on_status
     await host.set_markets(specs)
     print(f"... streaming {len(specs)} markets for {seconds:.0f}s", flush=True)
     await asyncio.sleep(seconds)
     feats = host.tick(time.time())
     health = host.feeds.health()
-    for k, st in stats.items():  # final feed status per market as seen by the feed manager
-        ms = host.feeds.market_status.get(k)
-        if ms:
-            st["status"].append((ms["status"], str(ms.get("reason", ""))[:120]))
     await host.stop()
-    ok = 0
     for (ex, sym), st in stats.items():
         f = next((x for x in feats.get(st["asset"], []) if x["exchange"] == ex and x["symbol"] == sym), {})
-        good = st["books"] > 0
-        ok += good
-        rec(f"9 stream {ex} {sym}", "PASS" if good and st["trades"] else ("WARN" if good else "FAIL"),
+        status = "FAIL" if not st["books"] else ("WARN" if st["incidents"] or not st["trades"] else "PASS")
+        inc = ""
+        if st["incidents"]:
+            inc = f"; INCIDENTS {len(st['incidents'])}: " + " | ".join(list(dict.fromkeys(st["incidents"]))[:3])
+        rec(f"{tag} stream {ex} {sym}", status,
             f"books {st['books']}, trades {st['trades']}, first book after {st['first_book']}s, "
             f"state {f.get('state')}, depth +/-1% ${(f.get('bid_depth_1') or 0):,.0f}/${(f.get('ask_depth_1') or 0):,.0f}, "
-            f"book coverage {f.get('book_coverage_pct')}%, statuses {st['status'][-3:]}")
-    frac = ok / max(1, len(stats))
-    rec("9 realtime summary", "PASS" if frac >= 0.8 else ("WARN" if frac >= 0.5 else "FAIL"),
-        f"{ok}/{len(stats)} markets delivered order books", data={"health": health})
+            f"book coverage {f.get('book_coverage_pct')}%, statuses {st['status'][-4:]}{inc}"
+            + (" [added by --exchanges; not a top venue]" if why.get((ex, sym)) == "forced" else ""))
+    worst, bad_ex = "PASS", []
+    for ex in sorted({k[0] for k in stats}):
+        mk = [st for k, st in stats.items() if k[0] == ex]
+        n_ok = sum(1 for st in mk if st["books"])
+        h = health.get(ex, {})
+        parts = h.get("partitions", [])
+        errs, incidents = int(h.get("errors", 0)), sum(len(st["incidents"]) for st in mk)
+        last = "; ".join(sorted({p["last_error"] for p in parts if p.get("last_error")}))[:300]
+        status = "FAIL" if n_ok < len(mk) else ("WARN" if errs or incidents else "PASS")
+        rec(f"{tag} exchange {ex}", status,
+            f"{n_ok}/{len(mk)} markets streaming; feed errors {errs}, incidents {incidents}, "
+            f"client rebuilds {sum(p.get('rebuilds', 0) for p in parts)}, "
+            f"breaker trips {sum(p.get('breaker_trips', 0) for p in parts)}, reconnects {h.get('reconnects', 0)}"
+            + (f"; last error: {last}" if last else ""), data={"health": h})
+        if status != "PASS":
+            bad_ex.append(f"{ex}={status}")
+        worst = max(worst, status, key=RANK.get)
+    ok = sum(1 for st in stats.values() if st["books"])
+    rec(f"{tag} realtime summary", worst, f"{ok}/{len(stats)} markets delivered order books"
+        + (f"; not clean: {', '.join(bad_ex)}" if bad_ex else "; no feed errors"))
+    return worst
 
 
 async def etherscan_check(cfg, http) -> None:
@@ -335,6 +414,9 @@ def main() -> None:
     ap.add_argument("--seconds", type=float, default=90.0)
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--save-fixtures", action="store_true")
+    ap.add_argument("--repeat", type=int, default=1, help="repeat the realtime streaming check N times (fresh feed manager each round)")
+    ap.add_argument("--exchanges", default="", help="stream only markets on these exchanges, e.g. kucoin (adds each asset's "
+                    "best pair there even if it is not a top venue)")
     ap.add_argument("--sim", action="store_true", help="run against the synthetic SIM exchanges (offline check of this tool)")
     a = ap.parse_args()
     check_packages()

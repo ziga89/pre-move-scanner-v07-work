@@ -1,0 +1,67 @@
+name: v0.7 live feeds (real exchanges)
+
+# Live market-data checks against the real exchanges from GitHub-hosted runners.
+# Not part of the required CI: results depend on the internet and on each exchange's
+# availability from the runner's region (some exchanges geo-block US data centres).
+
+on:
+  push:
+    branches: [claude/pre-move-scanner-audit-p9l0bi]
+    paths:
+      - "pre_move_scanner_v07_work/server/feeds/**"
+      - "pre_move_scanner_v07_work/tools/feed_stress.py"
+      - "pre_move_scanner_v07_work/tools/selftest.py"
+      - ".github/workflows/live-feeds.yml"
+  workflow_dispatch:
+
+jobs:
+  kucoin:
+    name: live KuCoin / ${{ matrix.os }} / run ${{ matrix.run }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        run: [1, 2]
+    defaults:
+      run:
+        shell: bash
+        working-directory: pre_move_scanner_v07_work
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+      - name: Live KuCoin stress - 12 cycles of start / resubscribe / stop-start / socket drop / rebuild / new manager
+        run: python tools/feed_stress.py --exchange kucoin --assets QNT,XDC,LINK --cycles 12 --hold 15
+      - name: Live self-test, KuCoin markets, 3 rounds
+        continue-on-error: true   # steps 4-8 depend on CoinGecko / other exchanges; KuCoin is checked below
+        run: |
+          python tools/selftest.py --assets QNT,XDC,LINK --exchanges kucoin --repeat 3 --seconds 45
+          cp data/selftest_report.md data/selftest_kucoin.md; cp data/selftest_report.json data/selftest_kucoin.json
+      - name: KuCoin rounds in the self-test must not FAIL
+        run: |
+          python - <<'EOF'
+          import json, re, sys
+          r = json.load(open("data/selftest_kucoin.json"))["results"]
+          rows = [x for x in r if re.match(r"^9(\.\d+)? (exchange|stream) kucoin", x["step"])]
+          for x in rows:
+              print(f"[{x['status']}] {x['step']}: {x['detail'][:300]}")
+          if not rows or any(x["status"] == "FAIL" for x in rows):
+              sys.exit("KuCoin streaming failed (or was not tested) in the live self-test")
+          EOF
+      - name: Full live self-test, all exchanges, 2 rounds (informational)
+        continue-on-error: true
+        run: |
+          python tools/selftest.py --repeat 2 --seconds 60
+          cp data/selftest_report.md data/selftest_full.md; cp data/selftest_report.json data/selftest_full.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-reports-${{ matrix.os }}-run${{ matrix.run }}
+          path: |
+            pre_move_scanner_v07_work/data/*.md
+            pre_move_scanner_v07_work/data/*.json

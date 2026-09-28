@@ -10,11 +10,24 @@ TradeTuple = Tuple[Optional[float], float, float, str, Optional[str]]
 PERMANENT_ERRORS = {"BadSymbol", "NotSupported", "BadRequest", "ArgumentsRequired", "InvalidOrder",
                     "PermissionDenied", "AccountNotEnabled", "MarketClosed"}
 
+# Exceptions that mean "this client instance is unusable" (programming / lifecycle errors
+# raised inside the exchange library, a closed instance, a wrong event loop). Retrying on the
+# same instance can never succeed, and they say nothing about the market itself: the partition
+# rebuilds its client instead. Example: ccxt KuCoin before open() ->
+# AttributeError: 'NoneType' object has no attribute 'create_task'.
+CLIENT_ERRORS = {"AttributeError", "TypeError", "ExchangeClosedByUser", "InvalidStateError",
+                 "StreamClientClosed", "StreamClientLoopError"}
+
 
 def classify_error(exc: BaseException) -> str:
+    """'permanent' (market can never work), 'client' (rebuild the client) or 'transient' (retry)."""
     names = {c.__name__ for c in type(exc).__mro__}
     if names & PERMANENT_ERRORS:
         return "permanent"
+    if names & CLIENT_ERRORS:
+        return "client"
+    if isinstance(exc, RuntimeError) and "event loop" in str(exc).lower():
+        return "client"
     return "transient"
 
 

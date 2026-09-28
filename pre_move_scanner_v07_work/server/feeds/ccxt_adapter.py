@@ -3,9 +3,14 @@
 ccxt is imported lazily so the rest of the scanner (and the test-suite) runs
 without it. REST (catalog) and websocket (stream) use the SAME unified
 symbols, so a pair discovered via fetch_tickers is exactly the pair streamed.
+
+Client lifecycle (see CcxtStreamClient): every stream client is one ccxt.pro
+instance, owned by one feed-manager partition, bound to the running event loop
+before its first watch, closed exactly once and never reused after close.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Dict, List, Optional
 
@@ -23,29 +28,75 @@ def ccxt_available() -> bool:
         return False
 
 
+class StreamClientClosed(Exception):
+    """A watch was attempted on a stream client that was already closed."""
+
+
+class StreamClientLoopError(RuntimeError):
+    """A stream client was used from a different event loop than the one it is bound to."""
+
+
 class CcxtStreamClient:
-    def __init__(self, ex):
+    """One ccxt.pro instance used by one partition.
+
+    ccxt binds an instance to the event loop in `open()`. ccxt calls `open()` from REST
+    requests, `client()` and `watch_multiple()`, but some exchanges schedule tasks before
+    any of those: KuCoin's watchers call `negotiate()` -> `spawn()` ->
+    `self.asyncio_loop.create_task(...)` first. When the markets were shared from the
+    catalog (`set_markets`), no REST request has run, `asyncio_loop` is still None and every
+    KuCoin subscription fails with
+    AttributeError: 'NoneType' object has no attribute 'create_task'.
+    `_ready()` therefore opens the instance inside the running loop before the first watch.
+    """
+
+    def __init__(self, ex, exchange: str = ""):
         self.ex = ex
+        self.exchange = exchange or str(getattr(ex, "id", "") or "")
         self.has = dict(getattr(ex, "has", {}) or {})
+        self.closed = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def _ready(self) -> None:
+        if self.closed:
+            raise StreamClientClosed(f"{self.exchange} stream client was closed")
+        loop = asyncio.get_running_loop()
+        if self._loop is loop:
+            return
+        if self._loop is not None:
+            raise StreamClientLoopError(f"{self.exchange} stream client is bound to another event loop")
+        opener = getattr(self.ex, "open", None)
+        if callable(opener) and getattr(self.ex, "asyncio_loop", None) is None:
+            opener()
+        bound = getattr(self.ex, "asyncio_loop", loop)
+        if bound is not None and bound is not loop:
+            raise StreamClientLoopError(f"{self.exchange} ccxt instance is bound to another event loop")
+        self._loop = loop
 
     async def watch_book(self, symbol: str, limit: Optional[int]) -> Dict[str, Any]:
+        self._ready()
         ob = await (self.ex.watch_order_book(symbol, limit) if limit else self.ex.watch_order_book(symbol))
         return {"symbol": ob.get("symbol", symbol), "bids": ob["bids"], "asks": ob["asks"],
                 "nonce": ob.get("nonce"), "timestamp": ob.get("timestamp")}
 
     async def watch_books(self, symbols: List[str], limit: Optional[int]) -> Dict[str, Any]:
+        self._ready()
         ob = await (self.ex.watch_order_book_for_symbols(symbols, limit) if limit
                     else self.ex.watch_order_book_for_symbols(symbols))
         return {"symbol": ob.get("symbol"), "bids": ob["bids"], "asks": ob["asks"],
                 "nonce": ob.get("nonce"), "timestamp": ob.get("timestamp")}
 
     async def watch_trades(self, symbol: str) -> List[Dict[str, Any]]:
+        self._ready()
         return await self.ex.watch_trades(symbol)
 
     async def watch_trades_multi(self, symbols: List[str]) -> List[Dict[str, Any]]:
+        self._ready()
         return await self.ex.watch_trades_for_symbols(symbols)
 
     async def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
         await self.ex.close()
 
 
@@ -59,6 +110,7 @@ class CcxtAdapter:
         self._markets = None
         self._currencies = None
         self._has: Optional[Dict[str, Any]] = None
+        self.market_share_error = ""
 
     def _modules(self):
         if self._mod is None or self._pro is None:
@@ -104,14 +156,21 @@ class CcxtAdapter:
         return cat.index()
 
     def new_stream_client(self) -> CcxtStreamClient:
+        """A fresh ccxt.pro instance (never a reused or closed one) for one partition generation."""
         _, pro = self._modules()
-        ex = getattr(pro, self.ccxt_id)(self._options())
+        opts = self._options()
+        try:  # bind to the loop that will run it (ccxt's documented `asyncio_loop` option)
+            opts["asyncio_loop"] = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        ex = getattr(pro, self.ccxt_id)(opts)
         if self._markets is not None:
+            # Share the catalog's markets: no load_markets REST call per partition / reconnect.
             try:
                 ex.set_markets(self._markets, self._currencies)
-            except Exception:
-                pass
-        return CcxtStreamClient(ex)
+            except Exception as exc:  # the instance then loads its markets itself
+                self.market_share_error = f"{type(exc).__name__}: {exc}"[:200]
+        return CcxtStreamClient(ex, self.exchange)
 
     async def close(self) -> None:
         if self._rest is not None:

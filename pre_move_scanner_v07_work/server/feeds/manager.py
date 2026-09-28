@@ -7,8 +7,15 @@
   retries transient errors with exponential backoff + jitter. Permanent
   errors (bad symbol, not supported) mark that market UNAVAILABLE.
 * A multi-symbol chunk that hits a symbol error falls back to per-symbol loops.
-* Circuit breaker: too many failures in a window → partition pauses for a
-  cooldown (state CIRCUIT_OPEN), then restarts with a fresh client.
+* Client errors (the client instance itself is unusable: library lifecycle bugs,
+  closed instance, wrong event loop) rebuild the partition's client once per
+  generation, with backoff; they never mark a market UNAVAILABLE.
+* Every loop is bound to the client generation it was started with; a loop never
+  touches a newer, closed or missing client.
+* Circuit breaker: too many failures in a window while the partition delivers no
+  data at all → partition pauses for a cooldown (state CIRCUIT_OPEN), then restarts
+  with a fresh client. A partition that still delivers data for some markets never
+  trips it, so one failing market cannot take down the healthy ones.
 * Watchdog: a partition that receives nothing for too long is restarted
   (half-open sockets).
 * One exchange disconnecting never affects the others.
@@ -36,23 +43,30 @@ class Partition:
         self.task: Optional[asyncio.Task] = None
         self.loops: Dict[str, asyncio.Task] = {}
         self.client = None
+        self.generation = 0
         self.book_msgs = 0
         self.trade_msgs = 0
         self.reconnects = 0
+        self.rebuilds = 0
+        self.breaker_trips = 0
+        self.consecutive_rebuilds = 0
         self.errors = 0
         self.last_error = ""
         self.last_msg_ts = 0.0
         self.last_book_ts = 0.0
+        self.last_data_ts = 0.0          # last real message (0 until data has flowed)
         self.started_ts = 0.0
         self.failures: Deque[float] = deque(maxlen=200)
         self.breaker_until = 0.0
         self.single_fallback: Set[str] = set()
         self.dirty = False
+        self._rebuild_requested_gen = -1
         self._restart = asyncio.Event()
 
     # ---- bookkeeping
     def note_msg(self, kind: str) -> None:
-        self.last_msg_ts = self.mgr.clock()
+        self.last_msg_ts = self.last_data_ts = self.mgr.clock()
+        self.consecutive_rebuilds = 0
         if kind == "book":
             self.book_msgs += 1
             self.last_book_ts = self.last_msg_ts
@@ -68,10 +82,28 @@ class Partition:
         self.failures.append(now)
         win = float(self.mgr.cfg.get("breaker_window_seconds", 300))
         n = sum(1 for t in self.failures if now - t <= win)
-        if n >= int(self.mgr.cfg.get("breaker_failures", 6)) and self.breaker_until <= now:
+        # Isolation: while any market of this partition still delivers data, a failing market
+        # keeps retrying on its own backoff and never trips the breaker for the healthy ones.
+        healthy_s = float(self.mgr.cfg.get("breaker_healthy_seconds", 15))
+        healthy = self.last_data_ts > 0 and now - self.last_data_ts <= healthy_s
+        if n >= int(self.mgr.cfg.get("breaker_failures", 6)) and self.breaker_until <= now and not healthy:
             self.breaker_until = now + float(self.mgr.cfg.get("breaker_cooldown_seconds", 300))
+            self.breaker_trips += 1
             self.failures.clear()
             self._restart.set()
+
+    def request_rebuild(self, client, exc: BaseException) -> None:
+        """A loop found its client instance unusable: rebuild it (once per generation)."""
+        if client is not self.client or self._rebuild_requested_gen == self.generation:
+            return  # a loop of an older generation, or already requested by a sibling loop
+        self._rebuild_requested_gen = self.generation
+        self.rebuilds += 1
+        self.consecutive_rebuilds += 1
+        self.note_failure(exc)
+        reason = f"client rebuild after {type(exc).__name__}: {exc}"[:200]
+        for s in self.symbols:
+            self.mgr.sink.on_market_status(self.ex.name, s, "RECONNECTING", reason, self.mgr.clock())
+        self._restart.set()
 
     def backoff(self, attempt: int) -> float:
         base = float(self.mgr.cfg.get("backoff_initial_seconds", 1.0))
@@ -79,13 +111,26 @@ class Partition:
         d = min(cap, base * (2 ** min(attempt, 10)))
         return d * (0.75 + 0.5 * self.mgr.rng.random())
 
-    # ---- loops
-    async def _book_single(self, symbol: str) -> None:
+    # ---- loops (each bound to the client of the generation that started it)
+    def _failed(self, client, exc: BaseException, symbols: List[str], status: bool = True) -> str:
+        """Common error handling. Returns the error class: 'permanent', 'client' or 'transient'."""
+        kind = classify_error(exc)
+        if kind == "client":
+            self.request_rebuild(client, exc)
+        elif kind == "transient":
+            self.note_failure(exc)
+            if status:
+                for s in symbols:
+                    self.mgr.sink.on_market_status(self.ex.name, s, "DISCONNECTED",
+                                                   f"{type(exc).__name__}: {exc}"[:200], self.mgr.clock())
+        return kind
+
+    async def _book_single(self, client, symbol: str) -> None:
         caps, sink, ex = self.ex.caps, self.mgr.sink, self.ex.name
         resync, attempt, first = True, 0, True
-        while True:
+        while client is self.client:
             try:
-                ob = await self.client.watch_book(symbol, caps.book_limit)
+                ob = await client.watch_book(symbol, caps.book_limit)
                 now = self.mgr.clock()
                 sink.on_book(ex, symbol, ob.get("bids") or [], ob.get("asks") or [], now, resync)
                 if first or resync:
@@ -99,19 +144,19 @@ class Partition:
                     sink.on_market_status(ex, symbol, "UNAVAILABLE", f"{type(exc).__name__}: {exc}"[:200], self.mgr.clock())
                     self.last_error = f"{symbol}: {type(exc).__name__}"
                     return
-                self.note_failure(exc)
-                sink.on_market_status(ex, symbol, "DISCONNECTED", f"{type(exc).__name__}: {exc}"[:200], self.mgr.clock())
+                if self._failed(client, exc, [symbol]) == "client":
+                    return  # the supervisor rebuilds the client and restarts every loop
                 resync = True
                 await self.mgr.sleep(self.backoff(attempt))
                 attempt += 1
 
-    async def _books_multi(self, symbols: List[str]) -> None:
+    async def _books_multi(self, client, symbols: List[str]) -> None:
         caps, sink, ex = self.ex.caps, self.mgr.sink, self.ex.name
         resync_all, attempt = True, 0
         streaming: Set[str] = set()
-        while True:
+        while client is self.client:
             try:
-                ob = await self.client.watch_books(symbols, caps.book_limit)
+                ob = await client.watch_books(symbols, caps.book_limit)
                 now = self.mgr.clock()
                 sym = ob.get("symbol")
                 if sym not in symbols:
@@ -133,22 +178,21 @@ class Partition:
                     self.single_fallback.update(symbols)
                     self.last_error = f"multi-symbol book call failed ({type(exc).__name__}); per-symbol fallback"
                     for s in symbols:
-                        self._spawn(f"book:{s}", self._book_single(s))
+                        self._spawn(f"book:{s}", self._book_single(client, s))
                     return
-                self.note_failure(exc)
-                for s in symbols:
-                    sink.on_market_status(ex, s, "DISCONNECTED", f"{type(exc).__name__}: {exc}"[:200], self.mgr.clock())
+                if self._failed(client, exc, symbols) == "client":
+                    return
                 streaming.clear()
                 resync_all = True
                 await self.mgr.sleep(self.backoff(attempt))
                 attempt += 1
 
-    async def _trades_single(self, symbol: str) -> None:
+    async def _trades_single(self, client, symbol: str) -> None:
         sink, ex = self.mgr.sink, self.ex.name
         attempt = 0
-        while True:
+        while client is self.client:
             try:
-                trades = await self.client.watch_trades(symbol)
+                trades = await client.watch_trades(symbol)
                 now = self.mgr.clock()
                 grouped = trades_from_ccxt(trades)
                 rows = grouped.get(symbol) or grouped.get(None) or [t for g in grouped.values() for t in g]
@@ -162,16 +206,17 @@ class Partition:
                 if classify_error(exc) == "permanent":
                     self.last_error = f"{symbol} trades: {type(exc).__name__}"
                     return  # book may still work; trade tape just unavailable
-                self.note_failure(exc)
+                if self._failed(client, exc, [symbol], status=False) == "client":
+                    return
                 await self.mgr.sleep(self.backoff(attempt))
                 attempt += 1
 
-    async def _trades_multi(self, symbols: List[str]) -> None:
+    async def _trades_multi(self, client, symbols: List[str]) -> None:
         sink, ex = self.mgr.sink, self.ex.name
         attempt = 0
-        while True:
+        while client is self.client:
             try:
-                trades = await self.client.watch_trades_multi(symbols)
+                trades = await client.watch_trades_multi(symbols)
                 now = self.mgr.clock()
                 for sym, rows in trades_from_ccxt(trades).items():
                     if sym in symbols and rows:
@@ -183,9 +228,10 @@ class Partition:
             except Exception as exc:
                 if classify_error(exc) == "permanent":
                     for s in symbols:
-                        self._spawn(f"trades:{s}", self._trades_single(s))
+                        self._spawn(f"trades:{s}", self._trades_single(client, s))
                     return
-                self.note_failure(exc)
+                if self._failed(client, exc, symbols, status=False) == "client":
+                    return
                 await self.mgr.sleep(self.backoff(attempt))
                 attempt += 1
 
@@ -195,7 +241,7 @@ class Partition:
             old.cancel()
         self.loops[name] = asyncio.ensure_future(coro)
 
-    async def _start_loops(self) -> None:
+    async def _start_loops(self, client) -> None:
         caps = self.ex.caps
         syms = list(self.symbols)
 
@@ -204,12 +250,12 @@ class Partition:
             return self._restart.is_set()
         if caps.book_mode == "multi":
             for chunk in chunked(syms, caps.max_symbols_per_call):
-                self._spawn("books:" + ",".join(chunk), self._books_multi(chunk))
+                self._spawn("books:" + ",".join(chunk), self._books_multi(client, chunk))
                 if await pace_or_abort():
                     return
         elif caps.book_mode == "single":
             for s in syms:
-                self._spawn(f"book:{s}", self._book_single(s))
+                self._spawn(f"book:{s}", self._book_single(client, s))
                 if await pace_or_abort():
                     return
         else:
@@ -218,80 +264,93 @@ class Partition:
                                                "exchange has no websocket order book in the installed ccxt", self.mgr.clock())
         if caps.trade_mode == "multi":
             for chunk in chunked(syms, caps.max_symbols_per_call):
-                self._spawn("trades:" + ",".join(chunk), self._trades_multi(chunk))
+                self._spawn("trades:" + ",".join(chunk), self._trades_multi(client, chunk))
                 if await pace_or_abort():
                     return
         elif caps.trade_mode == "single":
             for s in syms:
-                self._spawn(f"trades:{s}", self._trades_single(s))
+                self._spawn(f"trades:{s}", self._trades_single(client, s))
                 if await pace_or_abort():
                     return
 
     async def _stop_loops(self) -> None:
-        for t in self.loops.values():
+        """Cancel and await every loop, then close the client exactly once (never reused)."""
+        loops = list(self.loops.values())
+        for t in loops:
             t.cancel()
-        for t in self.loops.values():
+        for t in loops:
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
         self.loops.clear()
-        if self.client is not None:
+        client, self.client = self.client, None
+        if client is not None:
             try:
-                await self.client.close()
+                await client.close()
             except Exception:
                 pass
-            self.client = None
 
     async def run(self) -> None:
         """Supervisor: (re)create client, run loops, watchdog, circuit breaker."""
         stale_s = max(float(self.mgr.cfg.get("watchdog_min_seconds", 60.0)),
                       3.0 * float(self.mgr.cfg.get("stale_book_seconds", 20)))
         first = True
-        while True:
-            now = self.mgr.clock()
-            if self.breaker_until > now:
-                self.state = "CIRCUIT_OPEN"
-                for s in self.symbols:
-                    self.mgr.sink.on_market_status(self.ex.name, s, "CIRCUIT_OPEN",
-                                                   f"circuit breaker open: {self.last_error}", now)
-                await self.mgr.sleep(self.breaker_until - now)
-                continue
-            self.state = "CONNECTING" if first else "RECONNECTING"
-            if not first:
-                self.reconnects += 1
-            first = False
-            self._restart.clear()
-            self.started_ts = self.mgr.clock()
-            self.last_msg_ts = self.last_book_ts = self.started_ts
-            try:
-                self.client = self.ex.adapter.new_stream_client()
-                await self._start_loops()
-                while not self._restart.is_set():
-                    await self.mgr.sleep(self.mgr.watchdog_interval)
-                    live_loops = [t for t in self.loops.values() if not t.done()]
-                    if self.symbols and not live_loops:
-                        self.state = "UNAVAILABLE"
-                        await self.mgr.sleep(self.mgr.watchdog_interval * 12)
-                        break
-                    # A hung order-book stream is caught even while trades still arrive.
-                    ref = self.last_book_ts if self.ex.caps.book_mode != "none" else self.last_msg_ts
-                    if self.mgr.clock() - ref > stale_s and self.symbols:
-                        self.note_failure(TimeoutError(f"no order-book messages for {stale_s:.1f}s (watchdog)"))
-                        for s in self.symbols:
-                            self.mgr.sink.on_market_status(self.ex.name, s, "DISCONNECTED", "watchdog: silent connection",
-                                                           self.mgr.clock())
-                        break
-                    if self.state == "LIVE" and any(t.done() for t in self.loops.values()):
-                        self.state = "DEGRADED"
-            except asyncio.CancelledError:
+        try:
+            while True:
+                now = self.mgr.clock()
+                if self.breaker_until > now:
+                    self.state = "CIRCUIT_OPEN"
+                    for s in self.symbols:
+                        self.mgr.sink.on_market_status(self.ex.name, s, "CIRCUIT_OPEN",
+                                                       f"circuit breaker open: {self.last_error}", now)
+                    await self.mgr.sleep(self.breaker_until - now)
+                    continue
+                if not first:
+                    self.reconnects += 1
+                    if self.consecutive_rebuilds:
+                        # a client that keeps failing before any data flows is rebuilt with backoff
+                        self.state = "RECONNECTING"
+                        await self.mgr.sleep(self.backoff(min(self.consecutive_rebuilds - 1, 6)))
+                self.state = "CONNECTING" if first else "RECONNECTING"
+                first = False
+                self._restart.clear()
+                self.generation += 1
+                self.started_ts = self.mgr.clock()
+                self.last_msg_ts = self.last_book_ts = self.started_ts
+                try:
+                    self.client = client = self.ex.adapter.new_stream_client()
+                    await self._start_loops(client)
+                    while not self._restart.is_set():
+                        await self.mgr.sleep(self.mgr.watchdog_interval)
+                        if self._restart.is_set():
+                            break
+                        live_loops = [t for t in self.loops.values() if not t.done()]
+                        if self.symbols and not live_loops:
+                            # every loop ended on permanent errors: nothing to stream until the set changes
+                            self.state = "UNAVAILABLE"
+                            await self.mgr.sleep(self.mgr.watchdog_interval * 12)
+                            break
+                        # A hung order-book stream is caught even while trades still arrive.
+                        ref = self.last_book_ts if self.ex.caps.book_mode != "none" else self.last_msg_ts
+                        if self.mgr.clock() - ref > stale_s and self.symbols:
+                            self.note_failure(TimeoutError(f"no order-book messages for {stale_s:.1f}s (watchdog)"))
+                            for s in self.symbols:
+                                self.mgr.sink.on_market_status(self.ex.name, s, "DISCONNECTED", "watchdog: silent connection",
+                                                               self.mgr.clock())
+                            break
+                        if self.state == "LIVE" and any(t.done() for t in self.loops.values()):
+                            self.state = "DEGRADED"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # client construction failed etc.
+                    self.note_failure(exc)
+                    await self.mgr.sleep(self.backoff(min(self.reconnects, 6)))
                 await self._stop_loops()
-                self.state = "STOPPED"
-                raise
-            except Exception as exc:  # client construction failed etc.
-                self.note_failure(exc)
-                await self.mgr.sleep(self.backoff(min(self.reconnects, 6)))
-            await self._stop_loops()
+        finally:
+            # cancellation (unsubscribe / shutdown) or any unexpected exit: never leak loops or sockets
+            await asyncio.shield(self._stop_loops())
+            self.state = "STOPPED"
 
     def health(self) -> Dict[str, Any]:
         now = self.mgr.clock()
@@ -301,7 +360,8 @@ class Partition:
                 "book_msgs": self.book_msgs, "trade_msgs": self.trade_msgs,
                 "msgs_per_s": round((self.book_msgs + self.trade_msgs) / up, 2),
                 "last_msg_age_s": round(age, 1) if age is not None else None,
-                "reconnects": self.reconnects, "errors": self.errors, "last_error": self.last_error,
+                "generation": self.generation, "reconnects": self.reconnects, "rebuilds": self.rebuilds,
+                "breaker_trips": self.breaker_trips, "errors": self.errors, "last_error": self.last_error,
                 "single_fallback": sorted(self.single_fallback),
                 "breaker_open_for_s": round(max(0.0, self.breaker_until - now), 1)}
 
@@ -351,10 +411,15 @@ class FeedManager:
         changes = {"started": 0, "restarted": 0, "stopped": 0}
         for ex in list(self.exchanges):
             if ex not in desired or not desired[ex]:
-                for p in self.exchanges[ex].partitions:
-                    if p.task:
-                        p.task.cancel()
-                    changes["stopped"] += 1
+                tasks = [p.task for p in self.exchanges[ex].partitions if p.task]
+                for t in tasks:
+                    t.cancel()
+                for t in tasks:  # wait until loops are stopped and clients closed
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                changes["stopped"] += len(self.exchanges[ex].partitions)
                 del self.exchanges[ex]
         for ex, symbols in desired.items():
             if not symbols or ex not in self.adapters:
