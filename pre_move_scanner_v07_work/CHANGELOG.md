@@ -1,0 +1,94 @@
+# Changelog
+
+## v0.7.0 — Top-100 pre-move universe scanner
+
+### Scope
+* Scans a **Top-100 universe** instead of a hand-typed watchlist: CoinGecko market-cap ranking,
+  back-filled beyond rank 100 until 100 eligible **and** usable coins exist; stablecoins, wrapped /
+  staked / bridged tokens, tokenised gold and duplicate tickers excluded (with reasons); pinned coins
+  (default QNT, LINK, XDC) monitored in addition; hourly refresh with membership hysteresis;
+  cached-universe fallback if CoinGecko is unavailable.
+* Main screen is **Top anomalies right now**, ranked by Pre-Move score — never by market cap.
+
+### Venue discovery (per coin)
+* One `load_markets` + `fetch_tickers` per exchange (≈15 calls instead of ≈200 CoinGecko calls).
+* Ranking by the coin's **own** 24h USD volume; one best pair per exchange; up to 5 venues.
+* New safeguards: price identity check (rejects a different token sharing the ticker), live quote→USD FX
+  (USDT/USDC/EUR/KRW/TRY/BTC…), spread / stale / minimum-volume filters, wash-volume check vs visible
+  depth, realtime verification (no book within 90 s → next venue promoted), replacement hysteresis,
+  periodic re-discovery (v0.6 discovered once at startup), CoinGecko cross-check of unsupported top markets.
+
+### Feeds
+* **cryptofeed replaced by ccxt / ccxt.pro** (v0.6 called `load_symbols()` / `run_async()`, which could
+  not be confirmed against cryptofeed's documented API — see the audit; ccxt installs as pure-Python
+  wheels on Windows, is actively maintained, and uses the same symbols for discovery and streaming).
+* **Exchange capability matrix**: static per-exchange limits combined with the installed ccxt's `has`
+  flags; multi-symbol subscriptions only where supported, per-symbol elsewhere; automatic per-symbol
+  fallback when a multi-symbol call fails on one symbol.
+* Per-exchange partitions, exponential backoff with jitter, circuit breaker, order-book watchdog,
+  subscription diffing (only changed partitions restart), per-exchange / per-partition health.
+* Optional worker processes (`feeds.workers`) for Top 250 / 500.
+
+### Engine
+* ±2 % band-limited order book; diffs ignore far levels, band re-centring and truncated depth;
+  reconnect snapshots are never diffed (no phantom removal spikes); 60 s resync grace.
+* Bounded memory (fixed-size rings) — v0.6's raw deques silently truncated on busy markets.
+* New metrics: slippage for a coin-scaled order, **refill after fills** (churn-independent
+  replenishment), net ask flow, **cancellation/removal proxy with explicit confidence** (never presented
+  as confirmed cancellations), largest-trade share, 15/30/60 min returns per venue.
+* Lagged robust baselines (median / MAD; 30 min / 2 h / 24 h) per coin × venue × metric, rehydrated from
+  SQLite after a restart (no repeated warm-up). Receipt-time windows (clock-skew safe), duplicate and
+  historical-replay trade filtering.
+
+### Scoring
+* Sub-scores: order-book, liquidity (movability), buy pressure (absorption guard), cross-venue (with
+  leader → follower propagation); MM / Whale / CEX-flow / Scarcity from wallet intelligence.
+* Explicit order: structural → compression / context → confidence → independent-signal / venue /
+  liquidity-share / coverage / warm-up caps → **late-move penalty and hard cap last** → persistence.
+* Late-move logic: hard +5 %/15m, +8 %/30m, +12 %/1h **plus volatility-normalised displacement**
+  (robust σ per asset); `MOVE IN PROGRESS` and `LATE`.
+* Two-speed signal: `EMERGING` (30 s median, within ~30–60 s) and `CONFIRMED PRE-MOVE` /
+  `STRONG PRE-MOVE` (150 s median + 120 s hold), with hysteresis.
+* All thresholds relative to each venue's own normal (buy share, imbalance, depth, spread).
+* Null semantics: missing wallet data is **N/A** — never 0, never negative, never a signal family.
+* Human-readable reasons, and the cap that limited a score.
+
+### Wallet intelligence
+* Address-centric monitoring of labelled MM / CEX / custody / whale addresses (Etherscan V2, budgeted,
+  priority for top anomalies); token-wide polling only where manageable (auto-disabled above a transfer
+  rate); contract-symbol verification; balance snapshots; Δ1h / 6h / 24h / 7d per entity.
+* Conservative classifier (BUY, SELL, ACCUMULATION-SIDE, DISTRIBUTION-SIDE, SHIFT, UNKNOWN); Coinbase
+  Hot → Prime is SHIFT; CEX withdrawal ≠ purchase; MM routing detected via net vs gross flow; real supply
+  drain vs reshuffling.
+
+### History and events
+* SQLite WAL with a dedicated writer thread — no SQL on the event loop (v0.6 ran DB work on the feed loop).
+* 5 s / 10 s / 1-minute tables, 7-day charts from 1-minute rollups with **max-preserving** bucketing
+  (v0.6 stride sampling could hide spikes), 30-day asset history, 90-day events, retention by index.
+* Event timeline (status, score, book, flow, venue, price, wallet, system) with debounce / hysteresis
+  and automatic **breakout precursors** ("ask depth −38 % on Gate, 27 min before").
+* Signal outcome logging (forward 15m / 1h / 4h / 24h returns) for calibration.
+* **v0.6 history import** (read-only, hash-verified, idempotent); v0.6 series shown dashed in charts.
+
+### UI
+* New Top-anomalies table (keyed in-place updates — v0.6 collapsed panels every second), filters,
+  sorting, explicit N/A; coin detail, health and universe views; all v0.6 charts kept and extended.
+* WebSocket topics (`top`, `coin:X`, `health`) with latest-wins queues; HTTP polling fallback; no timer
+  leak on reconnect; PWA kept.
+
+### Tooling
+* `run_windows.bat` never overwrites `config.json` (v0.6 did on every start) and gains `selftest`, `sim`,
+  `import`, `test`.
+* `tools/selftest.py` (live checks + report), `tools/import_v06.py`, `tools/print_capabilities.py`,
+  `tools/bench_engine.py`, stdlib dev server (`python -m server.devserver --sim`).
+* 124 automated tests; GitHub Actions on Ubuntu + Windows × Python 3.11–3.13, JS lint, headless-browser UI
+  test, v0.6 integrity check.
+
+### Removed / replaced (functionality preserved)
+* `server/multivenue.py` → `server/engine/*`, `server/feeds/*`, `server/service.py`
+* `server/discover.py` → `server/universe/*`
+* `server/onchain.py` → `server/intel/*`
+* `server/scanner.py` (unused v0.1–v0.3 Binance scanner) — kept only in the v0.6 reference folder
+* `web/app.js` → `web/js/*` (charts ported into `web/js/charts.js`)
+* `cryptofeed` dependency → `ccxt`
+* iOS starter client: unchanged (it has not matched the server since v0.4 — see known limitations)

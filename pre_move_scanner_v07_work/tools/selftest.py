@@ -110,7 +110,7 @@ async def run(args) -> int:
         rec("4 CoinGecko categories", "PASS" if cats else "WARN",
             ", ".join(f"{k}={len(v)}" for k, v in cats.items()) or "none (static exclusion lists will be used)")
     except Exception as exc:
-        rec("4 CoinGecko markets", "FAIL", f"{exc!r} — check internet access / add a free Demo API key (COINGECKO_API_KEY)")
+        rec("4 CoinGecko markets", "FAIL", f"{exc!r} - check internet access / add a free Demo API key (COINGECKO_API_KEY)")
 
     if not ccxt_available():
         rec("5 exchange catalogs", "FAIL", "ccxt not installed (pip install -r requirements.txt)")
@@ -138,7 +138,7 @@ async def run(args) -> int:
             caps_rows.append(caps.to_dict())
             st = "PASS" if caps.book_mode != "none" else "WARN"
             rec(f"6 capabilities {ex}", st, f"book={caps.book_mode} trades={caps.trade_mode} "
-                f"≤{caps.max_symbols_per_connection} symbols/conn, {caps.max_symbols_per_call}/call; ccxt has={caps.runtime_has}")
+                f"<={caps.max_symbols_per_connection} symbols/conn, {caps.max_symbols_per_call}/call; ccxt has={caps.runtime_has}")
         except Exception as exc:
             rec(f"6 capabilities {ex}", "FAIL", repr(exc))
 
@@ -285,7 +285,7 @@ async def stream_check(cfg, adapters, selections, fx, seconds: float) -> None:
         ok += good
         rec(f"9 stream {ex} {sym}", "PASS" if good and st["trades"] else ("WARN" if good else "FAIL"),
             f"books {st['books']}, trades {st['trades']}, first book after {st['first_book']}s, "
-            f"state {f.get('state')}, depth ±1% ${(f.get('bid_depth_1') or 0):,.0f}/${(f.get('ask_depth_1') or 0):,.0f}, "
+            f"state {f.get('state')}, depth +/-1% ${(f.get('bid_depth_1') or 0):,.0f}/${(f.get('ask_depth_1') or 0):,.0f}, "
             f"book coverage {f.get('book_coverage_pct')}%, statuses {st['status'][-3:]}")
     frac = ok / max(1, len(stats))
     rec("9 realtime summary", "PASS" if frac >= 0.8 else ("WARN" if frac >= 0.5 else "FAIL"),
@@ -326,6 +326,10 @@ def finish() -> int:
 
 
 def main() -> None:
+    try:  # Windows consoles (cp1252) cannot print every character; never crash on output
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--assets", default="QNT,XDC,LINK,BTC,ETH,SOL,HBAR")
     ap.add_argument("--seconds", type=float, default=90.0)

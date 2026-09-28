@@ -1,5 +1,9 @@
 # Native iOS client
 
+> **v0.7 note:** This starter was not updated or compiled for v0.7. It has not matched the server's
+> WebSocket payload since v0.4. On iPhone, use the web app (`http://YOUR-PC-IP:8000`), which can be added
+> to the home screen. `/api/state` still serves a v0.6-shaped JSON view for existing clients.
+
 The scanner itself should run on a Mac/VPS/server. iOS can display the live feed,
 but iOS will suspend long-running socket/collector work when the app is backgrounded.
 

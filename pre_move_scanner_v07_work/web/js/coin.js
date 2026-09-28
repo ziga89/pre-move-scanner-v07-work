@@ -211,7 +211,9 @@ async function loadHistory() {
 function drawHistory(d) {
   const rows = d.composite || [];
   const legacy = d.legacy || [];
-  const ev = d.events || [];
+  // Charts mark only the decisive events; book/venue onsets stay in the timeline.
+  const MARK = new Set(["STATUS", "SCORE", "PRICE", "WALLET", "LEGACY"]);
+  const ev = (d.events || []).filter(e => MARK.has(e.category));
   const pct = v => (v * 100).toFixed(0) + "%";
   drawSeries($("#ch-price"), rows, [
     { label: "Price", get: r => r.price, color: "#5eead4" },

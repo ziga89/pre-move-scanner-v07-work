@@ -3,6 +3,13 @@
 **Status:** Phase 1 (audit only). No application code has been changed. Implementation waits for approval.
 **Date:** 2026-09-28
 
+> **Later note:** This proposal was approved with ten amendments: cancellation proxy with confidence,
+> address-centric wallet intelligence, the exchange capability matrix, volatility-normalised late-move
+> logic, the two-speed EMERGING / CONFIRMED signal, an explicit scoring order, universe back-fill, null
+> semantics, CI, and v0.6 untouched. It was then implemented. The design as built, including where it
+> differs from this proposal, is in [ARCHITECTURE.md](ARCHITECTURE.md). The document below is the original
+> audit, kept unchanged.
+
 ---
 
 ## 0. Workspace and integrity
