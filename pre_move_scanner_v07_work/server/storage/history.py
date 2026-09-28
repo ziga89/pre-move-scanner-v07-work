@@ -13,7 +13,8 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..engine.asset_state import STATUS_ORDER
 from ..engine.baselines import MINUTE_RAW
-from .schema import (ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_10S_COLS, MARKET_1M_COLS)
+from .schema import (ALERT_COLS, ALERT_JSON_COLS, ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_10S_COLS,
+                     MARKET_1M_COLS, TOKEN_CONTRACT_COLS)
 
 
 # ---------------------------------------------------------------- row builders
@@ -226,6 +227,51 @@ def alert_events_query(con: sqlite3.Connection, since: float, limit: int = 500) 
         rows.append(d)
     rows.reverse()
     return rows
+
+
+def alert_row(al: Dict[str, Any]) -> tuple:
+    """One alert (fired / updated / ended) as an `alerts` table row."""
+    return tuple(json.dumps(al.get(c), separators=(",", ":"), default=str) if c in ALERT_JSON_COLS else al.get(c)
+                 for c in ALERT_COLS)
+
+
+def _alert_dict(r: sqlite3.Row) -> Dict[str, Any]:
+    d = dict(r)
+    for c in ALERT_JSON_COLS:
+        try:
+            d[c] = json.loads(d.get(c) or "null")
+        except ValueError:
+            d[c] = None
+    return d
+
+
+def alerts_query(con: sqlite3.Connection, since: float, asset: Optional[str] = None,
+                 limit: int = 500) -> List[Dict[str, Any]]:
+    """Alerts that fired, ended or were still open inside [since, now], newest first."""
+    q = "SELECT * FROM alerts WHERE (fired_ts>=? OR ended_ts>=? OR ended_ts IS NULL)"
+    args: List[Any] = [since, since]
+    if asset:
+        q += " AND asset=?"
+        args.append(asset)
+    q += " ORDER BY fired_ts DESC LIMIT ?"
+    args.append(limit)
+    return [_alert_dict(r) for r in con.execute(q, args)]
+
+
+def close_open_alerts(con: sqlite3.Connection, now: float, reason: str) -> int:
+    """At start-up: alerts left open by the previous run cannot be re-verified."""
+    cur = con.execute("UPDATE alerts SET state='INVALIDATED', ended_ts=?, updated_ts=?, end_reason=?, "
+                      "duration_s=? - started_ts WHERE ended_ts IS NULL", (now, now, reason, now))
+    con.commit()
+    return cur.rowcount
+
+
+def load_token_contracts(con: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    return {r["asset"]: dict(r) for r in con.execute("SELECT * FROM token_contracts")}
+
+
+def token_contract_row(d: Dict[str, Any]) -> tuple:
+    return tuple(d.get(c) for c in TOKEN_CONTRACT_COLS)
 
 
 def load_market_minutes(con: sqlite3.Connection, asset: str, exchange: str, since: float) -> List[Dict[str, Any]]:

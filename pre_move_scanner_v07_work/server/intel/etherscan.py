@@ -29,6 +29,10 @@ class EtherscanBudgetExceeded(EtherscanError):
 
 
 class EtherscanClient:
+    """Transfer-data provider for the EVM chains in CHAIN_IDS (see intel/providers.py)."""
+    name = "etherscan"
+    chains = frozenset(CHAIN_IDS)
+
     def __init__(self, http: HttpClient, icfg: Dict[str, Any], clock=time.time, sleep=asyncio.sleep,
                  budget_store: Optional[Dict[str, int]] = None):
         self.http = http
@@ -44,6 +48,13 @@ class EtherscanClient:
         self.errors = 0
         self.last_error = ""
         self.chain_errors: Dict[str, str] = {}
+
+    @property
+    def keyed(self) -> bool:
+        return bool(self.key)
+
+    def supports(self, chain: str) -> bool:
+        return chain in CHAIN_IDS
 
     def day_key(self) -> str:
         return "budget:" + time.strftime("%Y%m%d", time.gmtime(self.clock()))

@@ -9,12 +9,12 @@
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0f14'/%3E%3Cpath d='M5 22h6l3-9 4 12 3-7h6' fill='none' stroke='%23f5c451' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/styles.css">
-  <title>Pre‑Move Scanner v0.7.2</title>
+  <title>Pre‑Move Scanner v0.7.3</title>
 </head>
 <body>
 <header>
   <div class="brand">
-    <h1>Pre‑Move Scanner <span class="vtag">v0.7.2</span> <span id="mode" class="modetag"></span></h1>
+    <h1>Pre‑Move Scanner <span class="vtag">v0.7.3</span> <span id="mode" class="modetag"></span></h1>
     <p>Top‑100 universe · abnormal structure while price is still flat</p>
   </div>
   <nav>
@@ -23,7 +23,9 @@
     <a href="#/universe" data-view="universe">Universe</a>
   </nav>
   <div class="status"><span id="dot"></span><span id="connection">connecting…</span></div>
-  <div id="alert-rail" class="alert-rail" hidden aria-live="assertive"></div>
+  <div id="radar" class="radar radar-none" role="status" aria-live="polite" data-state="NONE">
+    <span class="r-state">NO HIGH-CONVICTION SETUP</span><span class="r-main r-quiet">waiting for data…</span>
+  </div>
 </header>
 
 <main>

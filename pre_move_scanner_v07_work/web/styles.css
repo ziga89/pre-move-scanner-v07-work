@@ -108,21 +108,42 @@ canvas.hist{height:54px}
   canvas{height:190px}
 }
 
-/* Global high-conviction alert rail. It lives inside the sticky header so the
-   warning stays visible on Anomalies, Coin, Health and Universe pages. */
-.alert-rail{width:100%;flex:1 0 100%;display:grid;gap:7px;margin-top:2px}
-.alert-rail[hidden]{display:none}
-.hc-alert{width:100%;border:1px solid rgba(61,220,151,.72);border-radius:11px;padding:9px 12px;text-align:left;
-  color:#ecfdf5;background:linear-gradient(90deg,rgba(13,92,65,.94),rgba(8,55,45,.96));cursor:pointer;
-  box-shadow:0 0 0 1px rgba(61,220,151,.08),0 0 20px rgba(61,220,151,.13);font:inherit;
-  display:grid;grid-template-columns:auto 1fr;gap:3px 12px;align-items:center;animation:hcPulse 2.6s ease-in-out infinite}
-.hc-alert:hover{border-color:var(--good);filter:brightness(1.06)}
-.hc-kicker{font-size:10px;font-weight:850;letter-spacing:.09em;color:#a7f3d0;grid-row:1/3;align-self:center}
-.hc-main{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap;font-size:12px}
-.hc-main b{font-size:18px}.hc-main strong{font-size:15px;color:#fff}.hc-main span{color:#d1fae5}
-.hc-reason{font-size:11.5px;color:#bbf7d0;white-space:normal;overflow:hidden;text-overflow:ellipsis}
-.hc-note{grid-column:2;font-size:9.5px;color:#86efac;opacity:.78}
+/* v0.7.3 Signal Radar: always visible inside the sticky header, on every view. */
+.radar{flex:1 0 100%;width:100%;display:flex;align-items:center;gap:10px 14px;flex-wrap:wrap;min-height:44px;
+  border:1px solid var(--line);border-radius:12px;padding:7px 12px;background:#0f151d;font-size:12.5px;margin-top:2px}
+.radar .r-state{font-size:11px;font-weight:850;letter-spacing:.08em;white-space:nowrap;padding:3px 8px;border-radius:7px;
+  background:#1b2531;color:var(--muted)}
+.radar .r-main{display:flex;align-items:baseline;gap:6px 10px;flex-wrap:wrap;flex:1 1 380px;min-width:0;background:none;border:0;
+  color:inherit;font:inherit;text-align:left;padding:0;cursor:pointer}
+.radar .r-quiet{cursor:default;color:var(--muted)}
+.radar .r-asset{font-size:17px} .radar .r-ev{font-size:15px}
+.radar .r-meta{color:#cbd5e1} .radar .r-reasons{color:#cbd5e1;flex-basis:100%;font-size:11.5px}
+.radar .r-why{flex-basis:100%;font-size:11.5px;color:#fca5a5}
+.radar .r-side{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-left:auto}
+.radar .r-note{font-size:10px;color:#64748b;flex-basis:100%;text-align:right}
+.radar .r-chip{font:inherit;font-size:11px;border-radius:999px;padding:2px 8px;border:1px solid var(--line);background:#141c26;
+  color:var(--text);cursor:pointer}
+.radar .rbar{display:inline-block;width:70px;height:6px;border-radius:4px;background:#1f2a37;vertical-align:middle;overflow:hidden}
+.radar .rbar i{display:block;height:100%;background:var(--blue)}
+.radar-watch{border-color:rgba(245,196,81,.55);background:linear-gradient(90deg,rgba(245,196,81,.10),#0f151d 60%)}
+.radar-watch .r-state{background:rgba(245,196,81,.18);color:var(--warn)}
+.radar-confirming{border-color:rgba(96,165,250,.7);background:linear-gradient(90deg,rgba(96,165,250,.14),#0f151d 60%)}
+.radar-confirming .r-state{background:rgba(96,165,250,.2);color:#bfdbfe}
+.radar-hc{border-color:rgba(61,220,151,.8);background:linear-gradient(90deg,rgba(13,92,65,.95),rgba(8,55,45,.9));color:#ecfdf5;
+  box-shadow:0 0 18px rgba(61,220,151,.18);animation:hcPulse 2.6s ease-in-out infinite}
+.radar-hc .r-state{background:rgba(61,220,151,.25);color:#a7f3d0} .radar-hc .r-meta,.radar-hc .r-reasons{color:#d1fae5}
+.radar-invalid{border-color:rgba(255,77,103,.65);background:linear-gradient(90deg,rgba(255,77,103,.12),#0f151d 60%)}
+.radar-invalid .r-state{background:rgba(255,77,103,.2);color:#fecdd3}
+.radar.stale{opacity:.6;border-style:dashed}
+.r-hc{border-color:var(--good)!important;color:#a7f3d0!important} .r-confirming{border-color:var(--blue)!important}
+.r-watch{border-color:var(--warn)!important} .r-invalid{border-color:var(--extreme)!important}
 @keyframes hcPulse{0%,100%{box-shadow:0 0 0 1px rgba(61,220,151,.08),0 0 15px rgba(61,220,151,.10)}50%{box-shadow:0 0 0 1px rgba(61,220,151,.18),0 0 25px rgba(61,220,151,.24)}}
+@media (prefers-reduced-motion:reduce){.radar-hc{animation:none}}
+/* explicit wallet-intelligence states (never a bare N/A) */
+.ws{font-size:10.5px;border:1px solid #334155;border-radius:6px;padding:1px 5px;white-space:nowrap;color:#94a3b8}
+.ws-off{color:#64748b;border-style:dashed} .ws-no_key{color:var(--warn);border-color:rgba(245,196,81,.5)}
+.ws-warming{color:#93c5fd;border-color:rgba(96,165,250,.45)} .ws-unsupported{color:#64748b;border-color:#334155}
+.ws-na{color:#94a3b8;border-style:dashed} .ws-ok{color:var(--good);border-color:rgba(61,220,151,.5)}
+.ws-bad{color:var(--extreme);border-color:rgba(255,77,103,.5)}
 .cat-ALERT{background:rgba(61,220,151,.18);color:#86efac;border:1px solid rgba(61,220,151,.25)}
-@media (prefers-reduced-motion:reduce){.hc-alert{animation:none}}
-@media (max-width:720px){.hc-alert{grid-template-columns:1fr;gap:4px}.hc-kicker{grid-row:auto}.hc-note{grid-column:1}.hc-main b{font-size:16px}}
+@media (max-width:720px){.radar{gap:6px}.radar .r-side{margin-left:0}.radar .r-note{text-align:left}.radar .r-asset{font-size:15px}}

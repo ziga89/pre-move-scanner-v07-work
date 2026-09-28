@@ -61,6 +61,27 @@ class IntelMonitor:
         self.priority_assets: Set[str] = set()
         self.status = "idle"
         self.last_error = ""
+        self.first_ok_ts: Dict[str, float] = {}               # chain -> first successful address poll
+        for t in self.tokens.values():
+            t["source"] = "config"
+
+    def supports(self, chain: str) -> bool:
+        fn = getattr(self.client, "supports", None)
+        return bool(fn(chain)) if callable(fn) else chain in CHAIN_IDS
+
+    def add_token(self, asset: str, chain: str, contract: str, decimals: Optional[int] = None,
+                  source: str = "discovered", token_wide: str = "off") -> bool:
+        """Track another token (e.g. a contract discovered from the universe). Configured tokens win."""
+        asset = asset.upper()
+        if asset in self.tokens:
+            return False
+        key = (chain.lower(), contract.lower())
+        if key in self.by_contract:
+            return False
+        self.tokens[asset] = {"chain": chain.lower(), "contract": contract.lower(), "token_wide": token_wide,
+                              "status": "pending", "verified_symbol": None, "decimals": decimals, "source": source}
+        self.by_contract[key] = asset
+        return True
 
     # ------------------------------------------------------------ helpers
     def asset_for(self, chain: str, contract: str) -> Optional[str]:
@@ -70,8 +91,8 @@ class IntelMonitor:
         t = self.tokens.get(asset.upper())
         if not t:
             return {"covered": False, "reason": "token not configured for wallet intelligence"}
-        if t["chain"] not in CHAIN_IDS:
-            return {"covered": False, "reason": f"chain {t['chain']} not supported"}
+        if not self.supports(t["chain"]):
+            return {"covered": False, "reason": f"chain {t['chain']} not supported", "unsupported": True}
         if t["status"].startswith("invalid"):
             return {"covered": False, "reason": t["status"]}
         addrs = self.labels.monitored(t["chain"])
@@ -146,7 +167,7 @@ class IntelMonitor:
         """Pick the next poll jobs given the remaining daily budget."""
         now = self.clock()
         jobs: List[Tuple[str, Any]] = []
-        chains = sorted({t["chain"] for t in self.tokens.values() if t["chain"] in CHAIN_IDS})
+        chains = sorted({t["chain"] for t in self.tokens.values() if self.supports(t["chain"])})
         addrs = [(c, a) for c in chains for a in self.labels.monitored(c)]
         remaining = self.client.remaining_today()
         secs_left = max(3600.0, 86400.0 - (now % 86400.0))
@@ -197,6 +218,7 @@ class IntelMonitor:
             st["lagging"] = True  # more pages pending: coverage incomplete this cycle
         self.cursors[ck] = start
         st["last_ok"] = self.clock()
+        self.first_ok_ts.setdefault(chain, st["last_ok"])
         return n
 
     async def poll_balance(self, asset: str, t: Dict[str, Any], lab) -> Optional[float]:
@@ -229,6 +251,7 @@ class IntelMonitor:
                 t["token_wide_reason"] = f"too active for token-wide polling ({rate:,.0f} transfers/h); address-centric only"
                 return 0
         t["token_wide_status"] = "active"
+        self.first_ok_ts.setdefault(t["chain"], self.clock())
         n = len(self._classify_rows(rows, t["chain"], "token"))
         if rows:
             self.cursors[ck] = max(int(r.get("blockNumber") or 0) for r in rows)

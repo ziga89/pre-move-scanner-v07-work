@@ -44,7 +44,7 @@ class StorageTest(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def test_migrations_and_wal(self):
-        self.assertEqual(self.db.applied, [1])
+        self.assertEqual(self.db.applied, [1, 2])   # 2 = v0.7.3 alerts + token_contracts
         mode = self.db.read_sync(lambda c: c.execute("PRAGMA journal_mode").fetchone()[0])
         self.assertEqual(mode.lower(), "wal")
         db2 = Database(self.dir / "v07.db", {})  # re-open: nothing re-applied

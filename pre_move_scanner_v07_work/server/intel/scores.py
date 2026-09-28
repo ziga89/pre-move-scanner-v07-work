@@ -46,10 +46,36 @@ def flow_windows(transfers: List[Dict[str, Any]], now: float) -> Dict[str, Dict[
     return out
 
 
+def whale_candidates(tx: List[Dict[str, Any]], min_usd: float, limit: int = 10) -> List[Dict[str, Any]]:
+    """Large transfers between a labelled exchange and an UNLABELLED address.
+
+    Shown as "UNKNOWN / WHALE CANDIDATE": the address is not identified, the transfer is
+    not counted in any score (it may be the exchange's own unlabelled wallet), and no
+    identity is inferred.
+    """
+    out = []
+    for t in tx:
+        usd = _usd(t)
+        if usd < min_usd or t.get("classification") != UNKNOWN:
+            continue
+        if t.get("from_type") in CEX_TYPES and not t.get("to_type"):
+            out.append({"address": t.get("to_addr"), "side": "received from exchange",
+                        "counterparty": t.get("from_entity"), "usd": usd, "ts": t.get("ts"), "tx": t.get("tx_hash"),
+                        "label": "UNKNOWN / WHALE CANDIDATE"})
+        elif t.get("to_type") in CEX_TYPES and not t.get("from_type"):
+            out.append({"address": t.get("from_addr"), "side": "sent to exchange",
+                        "counterparty": t.get("to_entity"), "usd": usd, "ts": t.get("ts"), "tx": t.get("tx_hash"),
+                        "label": "UNKNOWN / WHALE CANDIDATE"})
+    out.sort(key=lambda x: -x["usd"])
+    return out[:limit]
+
+
 def compute_scores(asset: str, transfers: List[Dict[str, Any]], coverage: Dict[str, Any], now: float,
-                   daily_volume_usd: Optional[float], ask_thinning: float = 0.0) -> Dict[str, Any]:
+                   daily_volume_usd: Optional[float], ask_thinning: float = 0.0,
+                   whale_candidate_usd: float = 250_000.0) -> Dict[str, Any]:
     na = {"mm": None, "whale": None, "cex_flow": None, "scarcity": None, "mm_direction": None,
           "whale_direction": None, "cex_flow_direction": None, "scarcity_direction": None,
+          "cex_outflow_attributed_share": None, "whale_candidates": [],
           "reasons": [], "coverage": coverage, "status": coverage.get("reason", "n/a")}
     if not coverage.get("covered"):
         return na
@@ -69,6 +95,12 @@ def compute_scores(asset: str, transfers: List[Dict[str, Any]], coverage: Dict[s
     ratio = abs(net_out) / vol
     res["cex_flow"] = round(100 * ramp(ratio, 0.002, 0.03) * damp, 1)
     res["cex_flow_direction"] = "OUTFLOW" if net_out > 0 and res["cex_flow"] > 0 else "INFLOW" if net_out < 0 and res["cex_flow"] > 0 else "NEUTRAL"
+    # Share of exchange outflow that reached LABELLED holders; the rest (unlabelled recipients)
+    # may be the exchange's own wallets and must never be read as buying.
+    out_all = sum(_usd(t) for t in tx if t.get("from_type") in CEX_TYPES and t["classification"] != SHIFT)
+    out_attr = sum(_usd(t) for t in tx if t.get("from_type") in CEX_TYPES and t["classification"] == ACC)
+    res["cex_outflow_attributed_share"] = round(out_attr / out_all, 3) if out_all > 0 else None
+    res["whale_candidates"] = whale_candidates(tx, whale_candidate_usd)
     if res["cex_flow"] >= 30:
         res["reasons"].append(f"Net CEX {'outflow' if net_out > 0 else 'inflow'} ${abs(net_out):,.0f} (24h, excl. shifts)")
 

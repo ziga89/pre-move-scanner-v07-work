@@ -37,6 +37,28 @@ export function empty(canvas, msg = "Collecting history…") {
   ctx.fillText(msg, 52, 32);
 }
 
+// High-conviction alert periods (v0.7.3): green band from fire to end, red line at invalidation.
+function bands(ctx, list, X, pad, w, ph, xmax) {
+  for (const b of (list || [])) {
+    const from = Number(b.fired_ts), to = Number(b.ended_ts || xmax);
+    if (!Number.isFinite(from)) continue;
+    const x0 = Math.max(pad.l, X(from)), x1 = Math.min(w - pad.r, X(to));
+    if (x1 < pad.l || x0 > w - pad.r) continue;
+    ctx.fillStyle = "rgba(61,220,151,.13)";
+    ctx.fillRect(x0, pad.t, Math.max(2, x1 - x0), ph);
+    ctx.strokeStyle = "rgba(61,220,151,.95)"; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(x0, pad.t); ctx.lineTo(x0, pad.t + ph); ctx.stroke();
+    ctx.fillStyle = "#86efac"; ctx.font = "bold 10px system-ui";
+    ctx.fillText("HC", x0 + 3, pad.t + 10);
+    if (b.ended_ts && b.state === "INVALIDATED" && X(to) <= w - pad.r) {
+      ctx.strokeStyle = "rgba(255,77,103,.9)"; ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(X(to), pad.t); ctx.lineTo(X(to), pad.t + ph); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = "#fda4af"; ctx.fillText("✕", X(to) + 2, pad.t + 10);
+    }
+  }
+  ctx.font = "10px system-ui";
+}
+
 function markers(ctx, events, X, pad, w, ph) {
   for (const e of (events || [])) {
     const x = X(Number(e.ts));
@@ -50,7 +72,7 @@ function markers(ctx, events, X, pad, w, ph) {
 
 /**
  * series: [{label, get(row), color, axis:'left'|'right', dash, width, rows?}]
- * opts: {ymin, ymax, rmin, rmax, formatY, formatR, events, xmin, xmax}
+ * opts: {ymin, ymax, rmin, rmax, formatY, formatR, events, bands, xmin, xmax}
  */
 export function drawSeries(canvas, rows, series, opts = {}) {
   if (!canvas) return;
@@ -103,6 +125,7 @@ export function drawSeries(canvas, rows, series, opts = {}) {
     const tw = ctx.measureText(label).width;
     ctx.fillText(label, Math.max(pad.l, Math.min(w - pad.r - tw, x - tw / 2)), h - 8);
   }
+  bands(ctx, opts.bands, X, pad, w, ph, xmax);
   markers(ctx, opts.events, X, pad, w, ph);
   const gap = Math.max(1, (xmax - xmin) / 60);
   series.forEach((s, idx) => {

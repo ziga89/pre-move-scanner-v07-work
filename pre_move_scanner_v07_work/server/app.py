@@ -196,6 +196,10 @@ def create_app(cfg: Optional[Dict[str, Any]] = None, service: Optional[ScannerSe
     async def alerts():
         return svc.alerts_payload()
 
+    @app.get("/api/radar")
+    async def radar():
+        return svc.radar_payload()
+
     @app.get("/api/alerts/history")
     async def alerts_history(days: float = Query(30.0, ge=1, le=365),
                              limit: int = Query(500, ge=1, le=5000)):

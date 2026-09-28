@@ -1,6 +1,7 @@
 // "Top anomalies right now" table.
 // Rows are keyed by coin and updated in place (v0.6 rebuilt all cards every
 // second, which collapsed open panels and cost a full re-render at Top-100).
+import { renderRadar, walletCell } from "./radar.js";
 import { $, $$, badge, esc, isNum, scoreCell, signedPct } from "./util.js";
 
 const PRE = new Set(["WATCH", "EMERGING", "CONFIRMED PRE-MOVE", "STRONG PRE-MOVE"]);
@@ -11,41 +12,6 @@ let last = null;
 let sortKey = null;
 let sortDir = -1;
 
-
-function ageText(seconds) {
-  const s = Math.max(0, Math.round(Number(seconds) || 0));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60), r = s % 60;
-  return r ? `${m}m ${r}s` : `${m}m`;
-}
-
-function renderAlerts(alerts) {
-  const rail = $("#alert-rail");
-  if (!rail) return;
-  const rows = Array.isArray(alerts) ? alerts : [];
-  if (!rows.length) {
-    rail.hidden = true;
-    rail.innerHTML = "";
-    return;
-  }
-  rail.hidden = false;
-  rail.innerHTML = rows.map(a => {
-    const reasons = (a.reasons || []).slice(0, 4).map(esc).join(" · ");
-    const venues = (a.confirmed_venues || []).map(esc).join(", ");
-    const wallet = a.wallet_status === "supportive" ? "wallet/CEX supportive" :
-      a.wallet_status === "unavailable" ? "wallet N/A — strict market-only threshold" :
-      a.wallet_status === "neutral" ? "wallet neutral" : esc(a.wallet_status || "wallet N/A");
-    return `<button class="hc-alert" data-asset="${esc(a.asset)}" title="Evidence score is not a probability or proof of a purchase.">` +
-      `<span class="hc-kicker">HIGH-CONVICTION BUY SETUP</span>` +
-      `<span class="hc-main"><b>${esc(a.asset)}</b><strong>${Number(a.evidence_score || 0).toFixed(0)}/100</strong>` +
-      `<span>${a.confirmed ?? 0}/${a.coverage ?? 0} venues · ${ageText(a.duration_s)} · ${esc(wallet)}</span></span>` +
-      `<span class="hc-reason">${reasons}${venues ? ` · [${venues}]` : ""}</span>` +
-      `<span class="hc-note">composite evidence — not proof of a purchase</span></button>`;
-  }).join("");
-  rail.querySelectorAll(".hc-alert").forEach(b => b.addEventListener("click", () => {
-    location.hash = `#/coin/${encodeURIComponent(b.dataset.asset)}`;
-  }));
-}
 
 function subCell(v, quiet) {
   // During warm-up / without live data a structural 0 would read as "measured, nothing found".
@@ -98,7 +64,7 @@ function passes(r) {
 export function renderTop(data) {
   if (!data || !data.rows) return;
   last = data;
-  renderAlerts(data.alerts);
+  renderRadar(data.radar);
   const tbody = $("#top-table tbody");
   const seen = new Set();
   let rows = data.rows.slice();
@@ -123,9 +89,10 @@ export function renderTop(data) {
     setCell(tr, "ob", subCell(r.orderbook, quiet));
     setCell(tr, "bp", subCell(r.buy_pressure, quiet));
     setCell(tr, "cv", subCell(r.cross_venue, quiet));
-    setCell(tr, "mm", subCell(r.mm));
-    setCell(tr, "wh", subCell(r.whale));
-    setCell(tr, "cx", subCell(r.cex_flow));
+    const ws = (r.wallet && r.wallet.scores) || {};
+    setCell(tr, "mm", walletCell(r.mm, ws.mm || r.wallet));
+    setCell(tr, "wh", walletCell(r.whale, ws.whale || r.wallet));
+    setCell(tr, "cx", walletCell(r.cex_flow, ws.cex_flow || r.wallet));
     setCell(tr, "r15", retCell(r.r15));
     setCell(tr, "r60", retCell(r.r60));
     setCell(tr, "ven", venuesCell(r));

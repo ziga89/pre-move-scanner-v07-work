@@ -138,6 +138,13 @@ def make_handler(runner: _Runner):
                     return self._json(runner.call(svc.outcomes, float(q.get("days", 30))))
                 if p == "/api/state":
                     return self._json(runner.call(svc.state_compat))
+                if p == "/api/alerts":
+                    return self._json(runner.call(svc.alerts_payload))
+                if p == "/api/alerts/history":
+                    return self._json(runner.call(svc.alert_history, float(q.get("days", 30)),
+                                                  int(q.get("limit", 500))))
+                if p == "/api/radar":
+                    return self._json(runner.call(svc.radar_payload))
                 if p == "/ws":
                     return self._json({"detail": "websocket not available on the dev server; poll /api/top"}, 426)
                 return self._json({"detail": "not found"}, 404)

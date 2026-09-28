@@ -1,5 +1,5 @@
 // Network-first service worker (PWA install). API and WebSocket traffic is never cached.
-const CACHE = "premove-v07";
+const CACHE = "premove-v073";
 const ASSETS = ["/", "/static/styles.css", "/static/js/main.js", "/static/js/util.js", "/static/js/conn.js",
   "/static/js/top.js", "/static/js/coin.js", "/static/js/charts.js", "/static/js/health.js"];
 self.addEventListener("install", e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)).then(() => self.skipWaiting())));

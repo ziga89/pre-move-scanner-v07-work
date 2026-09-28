@@ -187,6 +187,14 @@ DEFAULTS: Dict[str, Any] = {
         "persistence_seconds": 120,
         "clear_after_seconds": 60,
         "max_active_banners": 3,
+        # v0.7.3 Signal Radar
+        "watch_min_premove": 70.0,          # WATCH: mandatory gates hold and pre-move >= this
+        "watch_min_confirmed_venues": 2,
+        "watch_min_orderbook": 50.0,
+        "watch_linger_seconds": 20,         # keep a WATCH entry briefly so the bar does not flicker
+        "invalidated_display_seconds": 900, # an invalidated alert stays listed this long
+        "invalidated_headline_seconds": 600,  # ... and is the headline state this long
+        "persist_update_seconds": 30,       # SQLite refresh cadence of an open alert
     },
     "events": {
         "score_thresholds": [55, 70, 80],
@@ -204,6 +212,7 @@ DEFAULTS: Dict[str, Any] = {
         "asset_1m_days": 30,
         "market_1m_days": 14,
         "events_days": 90,
+        "alerts_days": 365,
         "universe_days": 90,
         "health_days": 14,
         "intel_days": 90,
@@ -231,6 +240,13 @@ DEFAULTS: Dict[str, Any] = {
         "max_pages_per_poll": 3,
         "page_size": 1000,
         "legacy_labels": [],
+        # v0.7.3
+        "warmup_minutes": 60,               # WARMING until this much transfer history is collected
+        "auto_discover_contracts": True,    # EVM contracts of universe coins from CoinGecko (native tokens only)
+        "discovery_calls_per_minute": 2,    # shares the CoinGecko budget with the universe refresh
+        "discovery_ttl_days": 30,
+        "discovered_token_wide": "off",     # discovered tokens: address-centric only (budget-safe)
+        "whale_candidate_usd": 250000,      # unlabelled counterparties above this are listed, never counted
     },
     "sim": {
         "assets": 12,

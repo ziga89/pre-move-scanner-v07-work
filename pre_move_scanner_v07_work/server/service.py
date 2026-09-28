@@ -26,16 +26,21 @@ from .engine.events import EventDetector
 from .engine.host import LocalEngineHost, MarketSpec, ProcessEngineHost
 from .engine.leadlag import price_lead_lag
 from .feeds.registry import build_adapters
+from .intel.discovery import ContractDiscovery
 from .intel.etherscan import EtherscanClient
 from .intel.labels import LabelRegistry
 from .intel.monitor import IntelMonitor
+from .intel.providers import ProviderRegistry
 from .intel.scores import compute_scores, entity_balances
+from .intel.status import asset_status, coverage_summary, gate_scores
 from .intel.store import DbIntelStore
 from .storage.db import Database, prune
-from .storage.history import (alert_events_query, asset_history, asset_row_1m, asset_row_5s, event_row, events_query, fill_outcomes,
+from .storage.history import (alert_events_query, alert_row, alerts_query, close_open_alerts, load_token_contracts,
+                              token_contract_row, asset_history, asset_row_1m, asset_row_5s, event_row, events_query, fill_outcomes,
                               load_asset_closes, load_market_minutes, market_row_10s, market_row_1m, outcome_summary,
                               venue_history)
-from .storage.schema import ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_10S_COLS, MARKET_1M_COLS
+from .storage.schema import (ALERT_COLS, ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_10S_COLS, MARKET_1M_COLS,
+                             TOKEN_CONTRACT_COLS)
 from .universe.catalog import Catalog
 from .universe.coingecko import CoinGeckoClient
 from .universe.fx import FxService
@@ -46,6 +51,15 @@ from .util import rnd
 
 LATE_GROUP = ("MOVE IN PROGRESS", "LATE")
 QUIET_GROUP = ("NO DATA", "STALE", "WARMING")
+
+
+def _wallet_cells(ws: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compact per-row wallet state for the table: explicit state per score, never a bare N/A."""
+    if not ws:
+        return {"state": "WARMING", "label": "WARMING", "reason": "not evaluated yet", "scores": {}}
+    return {"state": ws.get("state"), "label": ws.get("label"), "reason": ws.get("reason"),
+            "scores": {k: {"state": v.get("state"), "label": v.get("label"), "reason": v.get("reason")}
+                       for k, v in (ws.get("scores") or {}).items()}}
 
 
 def _json_safe(o: Any) -> Any:
@@ -94,6 +108,10 @@ class ScannerService:
         self._last_persist_m = 0.0
         self._intel_cache: Dict[str, tuple] = {}
         self.listeners: List[Callable[[str, Dict[str, Any]], None]] = []
+        self.wallet_status: Dict[str, Dict[str, Any]] = {}
+        self.wallet_summary: Dict[str, Any] = {}
+        self._wallet_summary_ts = 0.0
+        self.radar: Dict[str, Any] = self.alerts.radar(clock())
 
         workers = int(cfg["feeds"].get("workers", 1))
         if workers > 1:
@@ -107,11 +125,23 @@ class ScannerService:
         self.labels.load_dicts(cfg["intel"].get("legacy_labels", []))
         self.intel: Optional[IntelMonitor] = None
         self.intel_store: Optional[DbIntelStore] = None
+        self.providers: Optional[ProviderRegistry] = None
+        self.contract_discovery: Optional[ContractDiscovery] = None
         if cfg["intel"].get("enabled"):
             self.intel_store = DbIntelStore(self.db)
-            client = EtherscanClient(self.http, cfg["intel"], budget_store=self.intel_store.budget)
-            self.intel = IntelMonitor(cfg["intel"], self.labels, client, self._asset_price, store=self.intel_store,
+            # one registry of wallet-data providers; Etherscan V2 serves the EVM chains today
+            self.providers = ProviderRegistry([EtherscanClient(self.http, cfg["intel"], budget_store=self.intel_store.budget)])
+            self.intel = IntelMonitor(cfg["intel"], self.labels, self.providers, self._asset_price, store=self.intel_store,
                                       on_event=self._external_event)
+            if cfg["intel"].get("auto_discover_contracts", True) and not self.sim:
+                try:
+                    cache = self.db.read_sync(load_token_contracts)
+                except Exception:
+                    cache = {}
+                self.contract_discovery = ContractDiscovery(self.cg, cfg["intel"], self.providers.supports,
+                                                            cache=cache, clock=clock)
+                for r in cache.values():
+                    self._track_discovered(r)
             try:
                 self.intel.transfers = [t for t in self.intel_store.load_transfers(self.clock() - 8 * 86400)]
                 for b in self.intel_store.load_balances(self.clock() - 8 * 86400):
@@ -133,6 +163,38 @@ class ScannerService:
         long_since = self.clock() - float(self.cfg["engine"].get("baseline_long_minutes", 1440)) * 60
         return [r for r in rows if r["ts"] >= long_since]
 
+    def _track_discovered(self, r: Dict[str, Any]) -> None:
+        """Start tracking a safely discovered contract (configured tokens always win)."""
+        if self.intel is None or r.get("state") != "supported" or not r.get("contract"):
+            return
+        self.intel.add_token(r["asset"], r["chain"], r["contract"], r.get("decimals"), source="discovered",
+                             token_wide=str(self.cfg["intel"].get("discovered_token_wide", "off")))
+
+    def _discovery_candidates(self) -> List[tuple]:
+        """(asset, coingecko id) for the universe: pinned first, then current anomalies, then by rank."""
+        def prio(a: str):
+            info = self.info[a]
+            return (0 if info.pinned else 1, -(self.results.get(a, {}).get("premove") or 0.0), info.rank or 9999)
+        return [(a, self.info[a].coin_id) for a in sorted(self.info, key=prio) if self.info[a].coin_id]
+
+    async def _contracts_loop(self) -> None:
+        per_min = max(0.0, float(self.cfg["intel"].get("discovery_calls_per_minute", 2)))
+        while True:
+            await asyncio.sleep(60)
+            if self.contract_discovery is None or per_min <= 0 or not (self.providers and self.providers.keyed()):
+                continue
+            try:
+                new = await self.contract_discovery.run_once(self._discovery_candidates(),
+                                                             configured=list(self.cfg["intel"].get("tokens") or {}),
+                                                             max_calls=int(per_min))
+                for r in new:
+                    self._track_discovered(r)
+                if new:
+                    self.db.insert("token_contracts", TOKEN_CONTRACT_COLS, [token_contract_row(r) for r in new])
+                    self._intel_cache.clear()
+            except Exception as exc:
+                self.status["contract_discovery_error"] = repr(exc)[:200]
+
     def _external_event(self, ev: Dict[str, Any]) -> None:
         e = self.events.add_external(ev)
         self.db.insert("events", EVENT_COLS, [event_row(e)], mode="", critical=True)
@@ -149,6 +211,13 @@ class ScannerService:
         if self.sim_driver is not None:
             self._tasks.append(asyncio.ensure_future(self.sim_driver.run()))
             await asyncio.sleep(0.05)
+        try:
+            n = await asyncio.to_thread(self.db.call, lambda c: close_open_alerts(
+                c, self.clock(), "scanner restarted - setup not re-verified after restart"))
+            if n:
+                self.status["alerts_closed_at_start"] = n
+        except Exception as exc:
+            self.status["alerts_error"] = repr(exc)[:200]
         await self.host.start()
         await self.refresh_catalogs()
         await self.refresh_universe()
@@ -161,6 +230,8 @@ class ScannerService:
                         asyncio.ensure_future(self._maintenance_loop())]
         if self.intel is not None:
             self._tasks.append(asyncio.ensure_future(self.intel.run(self._stop)))
+        if self.contract_discovery is not None:
+            self._tasks.append(asyncio.ensure_future(self._contracts_loop()))
 
     async def stop(self) -> None:
         self._stop.set()
@@ -409,16 +480,31 @@ class ScannerService:
 
     # ------------------------------------------------------------------ tick
     def _intel_ctx(self, asset: str, res_prev: Optional[Dict[str, Any]], now: float) -> Optional[Dict[str, Any]]:
-        if self.intel is None:
-            return None
+        """Wallet scores for the engine plus an explicit state (OFF / NO KEY / WARMING / UNSUPPORTED / N/A / value).
+
+        Only scores whose state is a real value reach the engine and the radar; everything
+        else is None, never 0."""
         c = self._intel_cache.get(asset)
         if c and now - c[0] < 30:
             return c[1]
-        info = self.info.get(asset)
-        sel = self.selections.get(asset)
-        vol = (sel.total_volume() if sel else None) or (info.volume_24h_usd if info else None)
-        thin = ((res_prev or {}).get("agg") or {}).get("family", {}).get("thinning", 0.0) if res_prev else 0.0
-        ctx = compute_scores(asset, self.intel.transfers, self.intel.coverage(asset), now, vol, thin)
+        icfg = self.cfg["intel"]
+        scores = None
+        if self.intel is not None:
+            info = self.info.get(asset)
+            sel = self.selections.get(asset)
+            vol = (sel.total_volume() if sel else None) or (info.volume_24h_usd if info else None)
+            thin = ((res_prev or {}).get("agg") or {}).get("family", {}).get("thinning", 0.0) if res_prev else 0.0
+            scores = compute_scores(asset, self.intel.transfers, self.intel.coverage(asset), now, vol, thin,
+                                    whale_candidate_usd=float(icfg.get("whale_candidate_usd", 250000)))
+        status = asset_status(asset, enabled=bool(icfg.get("enabled")) and not self.sim,
+                              keyed=bool(self.providers and self.providers.keyed()), monitor=self.intel,
+                              discovery=self.contract_discovery, labels=self.labels, scores=scores, now=now,
+                              warm_seconds=float(icfg.get("warmup_minutes", 60)) * 60.0)
+        if scores is not None:
+            status["whale_candidates"] = scores.get("whale_candidates") or []
+            status["cex_outflow_attributed_share"] = scores.get("cex_outflow_attributed_share")
+        self.wallet_status[asset] = status
+        ctx = gate_scores(scores, status) if scores is not None else None
         self._intel_cache[asset] = (now, ctx)
         return ctx
 
@@ -449,6 +535,7 @@ class ScannerService:
             sel = self.selections.get(asset)
             res = st.update(now, fl, len(sel.selected) if sel else len(fl), self._intel_ctx(asset, self.results.get(asset), now))
             info = self.info.get(asset)
+            res["wallet_status"] = self.wallet_status.get(asset)
             res["name"] = info.name if info else asset
             res["rank"] = info.rank if info else None
             res["pinned"] = bool(info and info.pinned)
@@ -469,6 +556,22 @@ class ScannerService:
                 if t["kind"] == "status" and t["to"] in ("EMERGING", "CONFIRMED PRE-MOVE", "STRONG PRE-MOVE"):
                     outcomes.append((now, asset, t["to"], res.get("premove"), res.get("price")))
             self.results[asset] = res
+        for ae in self.alerts.sweep(now, set(self.assets)):
+            new_events.append(self.events.add_external(ae))
+        changed = self.alerts.pop_changes()
+        if changed:
+            self.db.insert("alerts", ALERT_COLS, [alert_row(a) for a in changed], critical=True)
+        for gone in [a for a in self.wallet_status if a not in self.assets]:
+            self.wallet_status.pop(gone, None)
+        if now - self._wallet_summary_ts >= 10.0 or not self.wallet_summary:
+            self._wallet_summary_ts = now
+            icfg = self.cfg["intel"]
+            self.wallet_summary = coverage_summary(
+                self.wallet_status, enabled=bool(icfg.get("enabled")) and not self.sim,
+                keyed=bool(self.providers and self.providers.keyed()), monitor=self.intel,
+                discovery=self.contract_discovery, labels=self.labels,
+                chains=self.providers.supported_chains() if self.providers else [])
+        self.radar = self.alerts.radar(now, self.wallet_summary, self._feeds_summary())
         if self.intel is not None:
             top = sorted(self.results.values(), key=lambda r: -(r.get("premove") or 0))[:10]
             self.intel.priority_assets = {r["asset"] for r in top if (r.get("premove") or 0) >= 40}
@@ -498,6 +601,15 @@ class ScannerService:
             self.db.insert("signal_outcomes", ["ts", "asset", "status", "score", "price"], outcomes, mode="")
         self._emit("tick", {})
 
+    def _feeds_summary(self) -> Dict[str, Any]:
+        live = total = 0
+        for r in self.results.values():
+            live += int(r.get("coverage") or 0)
+            total += int(r.get("coverage_total") or 0)
+        share = (live / total) if total else 0.0
+        state = "NO_DATA" if live == 0 else ("DEGRADED" if share < 0.8 else "OK")
+        return {"state": state, "live_markets": live, "selected_markets": total, "live_share": round(share, 3)}
+
     # ------------------------------------------------------------------ payloads
     def top_payload(self) -> Dict[str, Any]:
         rows = []
@@ -516,6 +628,7 @@ class ScannerService:
                 "coverage_total": r.get("coverage_total"), "families": r.get("families"),
                 "reason": r.get("reason"), "cap_reason": r.get("cap_reason"),
                 "late_state": (r.get("late") or {}).get("state"),
+                "wallet": _wallet_cells(r.get("wallet_status")),
             })
 
         def key(x):
@@ -530,6 +643,7 @@ class ScannerService:
         max_alerts = int(self.cfg.get("alerts", {}).get("max_active_banners", 3))
         return _json_safe({"ts": self.clock(), "version": __version__, "mode": "sim" if self.sim else "live",
                            "rows": rows, "counts": counts, "alerts": self.alerts.active()[:max_alerts],
+                           "radar": self.radar, "wallet_intel": self.wallet_summary,
                            "universe": self.status.get("universe"),
                            "discovery": self.status.get("discovery")})
 
@@ -562,6 +676,8 @@ class ScannerService:
                     "selection": sel.to_dict() if sel else None, "books": books, "leadlag": leadlag,
                     "onsets": self.assets[asset].onsets.active() if asset in self.assets else [],
                     "high_conviction_alert": self.alerts.get(asset),
+                    "wallet_status": self.wallet_status.get(asset),
+                    "radar_entry": next((e for e in (self.radar.get("entries") or []) if e.get("asset") == asset), None),
                     "events": self.events.recent(asset, now - 6 * 3600)[-80:],
                     "wallet": wallet, "unsupported_top": self.unsupported_top.get(asset, []),
                     "fx": {q: self.fx.rate(q) for q in {v.get("quote") for v in r.get("venues", [])} if q}})
@@ -577,11 +693,15 @@ class ScannerService:
         return _json_safe({
             "ts": self.clock(), "version": __version__, "mode": "sim" if self.sim else "live",
             "status": self.status, "engine": h, "catalogs": cats, "venue_states": venue_states,
-            "coingecko": self.cg.stats(), "etherscan": self.intel.client.stats() if self.intel else {"enabled": False},
+            "coingecko": self.cg.stats(),
+            "etherscan": (self.providers.stats().get("etherscan", {}) if self.providers else {"enabled": False}),
             "intel_status": (self.intel.status if self.intel else "disabled"),
             "storage": self.db.stats(), "fx": self.fx.snapshot(),
             "labels": {"count": len(self.labels.labels), "errors": self.labels.errors[:20]},
-            "alerts": {"active": len(self.alerts.active()), "enabled": bool(self.cfg.get("alerts", {}).get("enabled", True))},
+            "alerts": {"active": len(self.alerts.active()), "enabled": bool(self.cfg.get("alerts", {}).get("enabled", True)),
+                       "radar_state": self.radar.get("state")},
+            "wallet_intel": self.wallet_summary,
+            "wallet_providers": self.providers.stats() if self.providers else {},
         })
 
     def universe_payload(self) -> Dict[str, Any]:
@@ -599,6 +719,7 @@ class ScannerService:
         h = await self.db.read(asset_history, asset, hours, now, max_points)
         h["venues"] = await self.db.read(venue_history, asset, hours, now, max(250, max_points // 2))
         h["events"] = await self.db.read(events_query, asset, now - hours * 3600, 500)
+        h["alerts"] = await self.db.read(alerts_query, now - hours * 3600, asset, 200)
         return _json_safe(h)
 
     async def timeline(self, asset: str, hours: float = 24.0) -> Dict[str, Any]:
@@ -616,12 +737,18 @@ class ScannerService:
         return _json_safe({
             "ts": self.clock(),
             "active": self.alerts.active(),
+            "radar": self.radar,
             "note": "HIGH_CONVICTION is a strict composite evidence alert, not a probability or proof of a purchase.",
         })
 
+    def radar_payload(self) -> Dict[str, Any]:
+        return _json_safe(self.radar)
+
     async def alert_history(self, days: float = 30.0, limit: int = 500) -> Dict[str, Any]:
-        rows = await self.db.read(alert_events_query, self.clock() - days * 86400.0, limit)
-        return _json_safe({"days": days, "events": rows})
+        since = self.clock() - days * 86400.0
+        rows = await self.db.read(alert_events_query, since, limit)
+        alerts = await self.db.read(alerts_query, since, None, limit)
+        return _json_safe({"days": days, "events": rows, "alerts": alerts})
 
     def state_compat(self) -> Dict[str, Any]:
         """v0.6-compatible /api/state shape (for old clients)."""

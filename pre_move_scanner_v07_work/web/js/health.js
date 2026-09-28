@@ -2,6 +2,34 @@
 import { $, ago, esc, fmtDateTime, num } from "./util.js";
 
 const STATE_CLS = { LIVE: "ok", PARTIAL: "warn", DISCONNECTED: "bad", CIRCUIT_OPEN: "bad", IDLE: "muted" };
+const WS_LABEL = { OK: "ON", NO_KEY: "NO KEY", NA: "N/A" };
+
+// Wallet-intelligence coverage: per-state asset counts, labelled addresses per chain,
+// tracked tokens (configured vs discovered), contract discovery and provider budgets.
+function walletIntelPanel(w, providers) {
+  if (!w) return "";
+  const states = Object.entries(w.by_state || {}).map(([k, n]) =>
+    `<span class="pill"><b>${n}</b><span class="ws ws-${esc(k.toLowerCase())}">${esc(WS_LABEL[k] || k)}</span></span>`).join("");
+  const labelled = Object.entries(w.labelled_addresses || {}).map(([c, t]) =>
+    `<tr><td>${esc(c)}</td><td class="wrap small">${Object.entries(t).map(([k, n]) => `${esc(k)} ${n}`).join(" · ")}</td></tr>`).join("");
+  const toks = Object.entries(w.tokens || {}).map(([k, n]) => `${n} ${esc(k)}`).join(" · ") || "none";
+  const d = w.discovery;
+  const disc = d ? `${d.known} checked (${Object.entries(d.by_state || {}).map(([k, n]) => `${esc(k)} ${n}`).join(", ") || "—"}) · ${d.pending} pending · ${d.calls} calls${d.errors ? ` · <span class="warn">${d.errors} errors</span>` : ""}`
+    : "off";
+  const prov = Object.entries(providers || {}).map(([name, p]) =>
+    `<tr><td>${esc(name)}</td><td>${p.keyed ? "keyed" : "<b class='warn'>no key</b>"} · ${p.used_today ?? 0}/${p.daily_budget ?? 0} calls today</td></tr>`).join("");
+  return `<div class="panel"><h3>Wallet intelligence</h3>
+    <div class="summary"><span class="ws ws-${esc(String(w.state || "off").toLowerCase())}">${esc(w.text || "")}</span> ${states}</div>
+    <table class="mini">
+      <tr><td>Tracked tokens</td><td>${toks}</td></tr>
+      <tr><td>Contract discovery</td><td class="wrap small">${disc}${d && d.last_error ? `<div class="bad small">${esc(d.last_error)}</div>` : ""}</td></tr>
+      <tr><td>Supported chains</td><td class="wrap small">${(w.supported_chains || []).map(esc).join(", ") || "—"}</td></tr>
+      <tr><td>Last poll</td><td>${w.last_poll ? `${ago(w.last_poll)} ago` : "—"}</td></tr>
+      ${prov}
+    </table>
+    ${labelled ? `<h4>Reliable labelled addresses</h4><table class="mini">${labelled}</table>` : `<div class="muted small">no labelled addresses loaded — scores stay N/A without independent labels (unknown wallets are never given an identity)</div>`}
+  </div>`;
+}
 
 export function renderHealth(h) {
   if (!h) return;
@@ -39,10 +67,12 @@ export function renderHealth(h) {
         <tr><td>Etherscan</td><td>${es.enabled === false ? "disabled" : `${es.used_today ?? 0}/${es.daily_budget ?? 0} calls today · ${es.keyed ? "keyed" : "<b class='warn'>no key</b>"}`}
           <div class="bad small">${esc(es.last_error || "")}</div>${Object.entries(es.chain_errors || {}).map(([c, e]) => `<div class="warn small">${esc(c)}: ${esc(e)}</div>`).join("")}</td></tr>
         <tr><td>Wallet intel</td><td>${esc(h.intel_status || "")} · ${(h.labels || {}).count ?? 0} labels${((h.labels || {}).errors || []).length ? ` · <span class="warn">${h.labels.errors.length} label errors</span>` : ""}</td></tr>
+        <tr><td>Signal Radar</td><td>${esc(((h.alerts || {}).radar_state) || "NONE")} · ${(h.alerts || {}).active ?? 0} active high-conviction</td></tr>
         <tr><td>Storage</td><td class="wrap">${esc(sto.path || "")}<div class="small">queue ${sto.queue ?? 0} · written ${sto.written_rows ?? 0} rows · dropped ${sto.dropped_rows ?? 0} · errors ${sto.errors ?? 0}</div>
           <div class="bad small">${esc(sto.last_error || "")}</div></td></tr>
       </table></div>
     </div>
+    ${walletIntelPanel(h.wallet_intel, h.wallet_providers)}
     <div class="panel"><h3>Exchanges</h3><div class="summary">${vs}</div><div class="scroll"><table class="mini"><thead><tr>
       <th>Exchange</th><th>State</th><th>Book / trades mode</th><th class="num">Streaming</th><th class="num">Partitions</th>
       <th class="num">msg/s</th><th class="num">Reconnects</th><th class="num">Errors</th><th>Notes</th></tr></thead>

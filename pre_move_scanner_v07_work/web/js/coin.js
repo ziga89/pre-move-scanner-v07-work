@@ -1,5 +1,6 @@
 // Coin detail view.
 import { drawDepth, drawSeries, drawVolume, empty } from "./charts.js";
+import { dur, walletCell } from "./radar.js";
 import { $, $$, ago, badge, esc, fmtDateTime, isNum, money, na, num, price, ratioPct, scoreCell, share, signedPct } from "./util.js";
 
 let current = null;
@@ -35,6 +36,8 @@ function head(d) {
         ${kv("Confidence", num(d.confidence, 2))}
         ${kv("Late-move index", `${num(late.L, 2)} <span class="muted small">${esc(late.state || "")}</span>`)}
         ${kv("Price range vs normal", isNum(d.compression) ? num(d.compression, 2) + "×" : "—")}
+        ${kv("Signal Radar", radarText(d))}
+        ${kv("Wallet intel", walletState(d.wallet_status))}
       </div>
     </div>
     <div style="text-align:right">
@@ -43,6 +46,22 @@ function head(d) {
       <div class="muted small">fast ${num(d.fast, 0)} · slow ${num(d.slow, 0)} · instant ${num(d.instant, 0)}</div>
       <div class="muted small">families: ${(d.families || []).map(f => esc(FAM[f] || f)).join(", ") || "none"}</div>
     </div>`;
+}
+
+function radarText(d) {
+  const e = d.radar_entry;
+  if (!e) return `<span class="muted">not on the radar</span>`;
+  const lbl = { HIGH_CONVICTION: "HIGH-CONVICTION BUY SETUP", CONFIRMING: "CONFIRMING", WATCH: "WATCH", INVALIDATED: "INVALIDATED" }[e.state] || e.state;
+  const cls = { HIGH_CONVICTION: "ok", CONFIRMING: "", WATCH: "warn", INVALIDATED: "bad" }[e.state] || "";
+  const ev = isNum(e.evidence_score) ? ` · evidence ${Number(e.evidence_score).toFixed(0)}/100` : "";
+  const t = e.state === "INVALIDATED" ? ` · ${esc(e.end_reason || "")}` : e.state === "HIGH_CONVICTION" ? ` · held ${dur(e.persistence_s)}` : ` · ${dur(e.persistence_s)}`;
+  return `<b class="${cls}">${esc(lbl)}</b>${ev}${t}`;
+}
+
+function walletState(ws) {
+  if (!ws) return `<span class="ws ws-warming">WARMING</span>`;
+  return `<span class="ws ws-${esc(String(ws.state).toLowerCase())}" title="${esc(ws.reason || "")}">${esc(ws.label || ws.state)}</span>
+    <span class="muted small">${esc(ws.reason || "")}</span>`;
 }
 
 function why(d) {
@@ -81,15 +100,19 @@ function pipeline(d) {
 function subs(d) {
   const s = d.subscores || {};
   const intel = d.intel || {};
-  const why = intel.status || (d.wallet ? (d.wallet.coverage || {}).reason : "wallet intelligence disabled");
+  const wsc = (d.wallet_status || {}).scores || {};
   const quiet = ["WARMING", "STALE", "NO DATA"].includes(d.status);
-  const card = (label, v, dir, tip) => quiet && tip === undefined
-    ? `<div class="sub"><label><span>${esc(label)}</span></label><div class="val muted">—</div><div class="muted small">baselines not established yet</div></div>` : `<div class="sub"><label><span>${esc(label)}</span><span class="muted">${esc(dir || "")}</span></label>
-    <div class="val">${isNum(v) ? v.toFixed(0) : na(tip)}</div>${isNum(v) ? scoreCell(v) : `<div class="muted small">${esc(tip || "")}</div>`}</div>`;
+  const card = (label, v, dir, st) => quiet && st === undefined
+    ? `<div class="sub"><label><span>${esc(label)}</span></label><div class="val muted">—</div><div class="muted small">baselines not established yet</div></div>`
+    : st !== undefined && !(st && st.state === "OK" && isNum(v))
+      ? `<div class="sub"><label><span>${esc(label)}</span></label><div class="val">${walletCell(null, st || { state: "WARMING", label: "WARMING" })}</div><div class="muted small">${esc((st && st.reason) || "")}</div></div>`
+      : `<div class="sub"><label><span>${esc(label)}</span><span class="muted">${esc(dir || "")}</span></label>
+    <div class="val">${isNum(v) ? v.toFixed(0) : na()}</div>${isNum(v) ? scoreCell(v) : ""}</div>`;
   $("#coin-subs").innerHTML = [
     card("Order-book", s.orderbook), card("Liquidity (movability)", s.liquidity), card("Buy pressure", s.buy_pressure),
-    card("Cross-venue", s.cross_venue), card("MM", s.mm, intel.mm_direction, why), card("Whale", s.whale, intel.whale_direction, why),
-    card("CEX flow", s.cex_flow, intel.cex_flow_direction, why), card("Scarcity / supply drain", s.scarcity, intel.scarcity_direction, why),
+    card("Cross-venue", s.cross_venue), card("MM", s.mm, intel.mm_direction, wsc.mm || null), card("Whale", s.whale, intel.whale_direction, wsc.whale || null),
+    card("CEX flow", s.cex_flow, intel.cex_flow_direction, wsc.cex_flow || null),
+    card("Scarcity / supply drain", s.scarcity, intel.scarcity_direction, wsc.scarcity || null),
   ].join("");
 }
 
@@ -136,11 +159,30 @@ function leadlag(d) {
     <table class="mini"><thead><tr><th>Venue</th><th class="num">Lag</th><th class="num">Corr.</th><th></th></tr></thead><tbody>${llRows || "<tr><td colspan=4 class='muted'>needs ≥ 2 live venues with price changes</td></tr>"}</tbody></table>`;
 }
 
+const SCORE_NAMES = { mm: "Market maker", whale: "Whale / custody", cex_flow: "CEX flow", scarcity: "Scarcity" };
+
+function walletStatusBlock(ws, intel) {
+  if (!ws) return "";
+  const sc = ws.scores || {};
+  const rows = Object.keys(SCORE_NAMES).map(k => `<tr><td>${SCORE_NAMES[k]}</td><td>${walletCell(intel ? intel[k] : null, sc[k])}</td>
+    <td>${esc((sc[k] || {}).direction || "")}</td><td class="wrap muted small">${esc((sc[k] || {}).reason || "")}</td></tr>`).join("");
+  const token = ws.contract ? `<span class="muted small">${esc(ws.chain || "")} · <code>${esc(ws.contract)}</code> · ${esc(ws.source === "discovered" ? "discovered from CoinGecko platforms (native token), on-chain symbol verified on first transfer" : "configured")}</span>` : "";
+  const cands = (ws.whale_candidates || []).map(c => `<tr><td><code>${esc((c.address || "").slice(0, 12))}…</code></td><td>${esc(c.side)} ${esc(c.counterparty || "")}</td>
+    <td class="num">${money(c.usd)}</td><td>${fmtDateTime(c.ts)}</td></tr>`).join("");
+  const share = isNum(ws.cex_outflow_attributed_share) ? ` · exchange outflow attributed to labelled holders: ${(100 * ws.cex_outflow_attributed_share).toFixed(0)}%` : "";
+  return `<p>${walletState(ws)} ${token}</p>
+    <table class="mini"><thead><tr><th>Score</th><th>State / value</th><th>Direction</th><th>Why</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="muted small">States: OFF (disabled) · NO KEY (no ETHERSCAN_API_KEY) · WARMING (contract lookup / first polls / history window) · UNSUPPORTED (chain not covered) · N/A (no reliable attribution) — never shown as 0.${share}</p>
+    ${cands ? `<h3 style="margin-top:10px">UNKNOWN / WHALE CANDIDATE <span class="muted small">unlabelled counterparties of large exchange transfers — no identity inferred, not counted in any score</span></h3>
+      <table class="mini"><thead><tr><th>Address</th><th>Transfer</th><th class="num">USD</th><th>Time</th></tr></thead><tbody>${cands}</tbody></table>` : ""}`;
+}
+
 function wallet(d) {
   const w = d.wallet;
+  const status = walletStatusBlock(d.wallet_status, d.intel);
   if (!w) {
-    $("#coin-wallet").innerHTML = `<p class="muted">Wallet intelligence is disabled. Enable <code>intel.enabled</code> in config.json,
-      set an Etherscan API key and add trusted labels in <code>labels/wallet_labels.csv</code>. MM / Whale / CEX scores stay N/A until then.</p>`;
+    $("#coin-wallet").innerHTML = status + `<p class="muted small">To enable: set <code>intel.enabled</code> in config.json,
+      set an Etherscan API key and add trusted labels in <code>labels/wallet_labels.csv</code>.</p>`;
     return;
   }
   const cov = w.coverage || {};
@@ -151,9 +193,9 @@ function wallet(d) {
     <td class="num">${num(t.amount, 0)}</td><td class="num">${money(t.usd_value)}</td>
     <td class="wrap">${esc(t.from_entity || (t.from_addr || "").slice(0, 10) + "…")} → ${esc(t.to_entity || (t.to_addr || "").slice(0, 10) + "…")}
     <div class="muted small">${esc(t.explanation || "")}</div></td></tr>`).join("");
-  $("#coin-wallet").innerHTML = `
+  $("#coin-wallet").innerHTML = status + `
     <p class="small">${cov.covered ? `<span class="ok">Covered</span> · ${cov.polled}/${cov.addresses} labelled addresses polled${(cov.lagging || []).length ? ` · <span class="warn">${cov.lagging.length} lagging</span>` : ""} · token‑wide: ${esc(cov.token_wide || "off")}`
-      : `<span class="warn">Not covered:</span> ${esc(cov.reason || "")} — scores are N/A`}</p>
+      : `<span class="warn">Not covered:</span> ${esc(cov.reason || "")}`}</p>
     ${(intel.reasons || []).length ? `<ul class="reasons">${intel.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
     <div class="scroll"><table class="mini"><thead><tr><th>Entity</th><th class="num">Balance</th><th class="num">Δ1h</th><th class="num">Δ6h</th><th class="num">Δ24h</th><th class="num">Δ7d</th></tr></thead>
     <tbody>${bal || "<tr><td colspan=6 class='muted'>no balance snapshots yet</td></tr>"}</tbody></table></div>
@@ -212,7 +254,8 @@ function drawHistory(d) {
   const rows = d.composite || [];
   const legacy = d.legacy || [];
   // Charts mark only the decisive events; book/venue onsets stay in the timeline.
-  const MARK = new Set(["STATUS", "SCORE", "PRICE", "WALLET", "LEGACY"]);
+  const MARK = new Set(["STATUS", "SCORE", "PRICE", "WALLET", "ALERT", "LEGACY"]);
+  const bands = d.alerts || [];   // high-conviction alert periods from the alerts table
   const ev = (d.events || []).filter(e => MARK.has(e.category));
   const pct = v => (v * 100).toFixed(0) + "%";
   drawSeries($("#ch-price"), rows, [
@@ -220,7 +263,7 @@ function drawHistory(d) {
     { label: "v0.6 price", get: r => r.price, color: "#64748b", dash: [4, 4], rows: legacy, noLegend: !legacy.length },
     { label: "Pre‑Move", get: r => r.score, color: "#fb7185", axis: "right" },
     { label: "v0.6 score", get: r => r.score, color: "#94a3b8", dash: [4, 4], axis: "right", rows: legacy, noLegend: !legacy.length },
-  ], { events: ev, rmin: 0, rmax: 100, formatY: v => "$" + Number(v).toLocaleString(undefined, { maximumFractionDigits: 6 }), formatR: v => Math.round(v) });
+  ], { events: ev, bands, rmin: 0, rmax: 100, formatY: v => "$" + Number(v).toLocaleString(undefined, { maximumFractionDigits: 6 }), formatR: v => Math.round(v) });
   drawSeries($("#ch-subs"), rows, [
     { label: "Pre‑Move (max)", get: r => r.score, color: "#fb7185", width: 2 },
     { label: "fast", get: r => r.fast, color: "#fbbf24", dash: [3, 3] },
@@ -228,7 +271,7 @@ function drawHistory(d) {
     { label: "liquidity", get: r => r.liquidity, color: "#a78bfa" },
     { label: "buy", get: r => r.buy_pressure, color: "#34d399" },
     { label: "cross‑venue", get: r => r.cross_venue, color: "#f97316" },
-  ], { events: ev, ymin: 0, ymax: 100, formatY: v => Math.round(v) });
+  ], { events: ev, bands, ymin: 0, ymax: 100, formatY: v => Math.round(v) });
   drawSeries($("#ch-flow"), rows, [
     { label: "Ask depth vs baseline", get: r => r.ask_depth_ratio, color: "#60a5fa" },
     { label: "Aggressive buy ratio", get: r => r.buy_ratio_60s, color: "#34d399" },

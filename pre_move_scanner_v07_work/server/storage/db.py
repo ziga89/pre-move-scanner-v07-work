@@ -204,11 +204,11 @@ class Database:
 
 def prune(con: sqlite3.Connection, scfg: Dict[str, Any], now: float) -> Dict[str, int]:
     out = {}
-    for table, key, unit in RETENTION:
+    for table, key, unit, *col in RETENTION:
         keep = float(scfg.get(key, 0) or 0) * unit
         if keep <= 0:
             continue
-        cur = con.execute(f"DELETE FROM {table} WHERE ts < ?", (now - keep,))
+        cur = con.execute(f"DELETE FROM {table} WHERE {col[0] if col else 'ts'} < ?", (now - keep,))
         out[table] = cur.rowcount
     return out
 

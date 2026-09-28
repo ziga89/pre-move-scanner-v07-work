@@ -101,6 +101,13 @@ class CoinGeckoClient:
                                                              "include_exchange_logo": "false", "depth": "true"})
         return (data or {}).get("tickers", []) if isinstance(data, dict) else []
 
+    async def coin_detail(self, coin_id: str) -> Dict[str, Any]:
+        """Platform data for one coin: asset_platform_id, platforms, detail_platforms (decimals)."""
+        data = await self.get(f"/coins/{coin_id}", {"localization": "false", "tickers": "false",
+                                                    "market_data": "false", "community_data": "false",
+                                                    "developer_data": "false", "sparkline": "false"})
+        return data if isinstance(data, dict) else {}
+
     def stats(self) -> Dict[str, Any]:
         return {"base": self.base, "keyed": bool(self.headers), "calls": self.calls,
                 "rate_limited": self.rate_limited, "errors": self.errors, "last_error": self.last_error}

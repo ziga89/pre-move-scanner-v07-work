@@ -146,15 +146,39 @@ CREATE TABLE IF NOT EXISTS legacy_import (
   ts REAL, source_path TEXT, source_sha256_before TEXT, source_sha256_after TEXT,
   rows_composite INTEGER, rows_venue INTEGER, rows_events INTEGER);
 """),
+    (2, "v0.7.3 high-conviction alerts + discovered token contracts", """
+CREATE TABLE IF NOT EXISTS alerts (
+  id TEXT PRIMARY KEY, asset TEXT NOT NULL, state TEXT NOT NULL,
+  started_ts REAL, fired_ts REAL, updated_ts REAL, ended_ts REAL, duration_s REAL,
+  evidence_score REAL, peak_evidence REAL, premove REAL, peak_premove REAL,
+  price_at_fire REAL, price_at_end REAL, confirmed INTEGER, coverage INTEGER, coverage_total INTEGER,
+  confirmed_venues TEXT, reasons TEXT, wallet_status TEXT, wallet_state TEXT,
+  structure_score REAL, execution_score REAL, end_reason TEXT, checks TEXT);
+CREATE INDEX IF NOT EXISTS idx_alerts_asset_fired ON alerts(asset, fired_ts);
+CREATE INDEX IF NOT EXISTS idx_alerts_fired ON alerts(fired_ts);
+
+CREATE TABLE IF NOT EXISTS token_contracts (
+  asset TEXT PRIMARY KEY, coingecko_id TEXT, state TEXT NOT NULL, chain TEXT, contract TEXT,
+  decimals INTEGER, reason TEXT, source TEXT, checked_ts REAL);
+"""),
 ]
 
+ALERT_COLS = ["id", "asset", "state", "started_ts", "fired_ts", "updated_ts", "ended_ts", "duration_s",
+              "evidence_score", "peak_evidence", "premove", "peak_premove", "price_at_fire", "price_at_end",
+              "confirmed", "coverage", "coverage_total", "confirmed_venues", "reasons", "wallet_status",
+              "wallet_state", "structure_score", "execution_score", "end_reason", "checks"]
+ALERT_JSON_COLS = ("confirmed_venues", "reasons", "checks")
+TOKEN_CONTRACT_COLS = ["asset", "coingecko_id", "state", "chain", "contract", "decimals", "reason", "source",
+                       "checked_ts"]
+
 RETENTION = [
-    # (table, config key, unit seconds)
+    # (table, config key, unit seconds[, time column - default "ts"])
     ("asset_metrics_5s", "asset_5s_hours", 3600),
     ("market_metrics_10s", "market_10s_hours", 3600),
     ("asset_metrics_1m", "asset_1m_days", 86400),
     ("market_metrics_1m", "market_1m_days", 86400),
     ("events", "events_days", 86400),
+    ("alerts", "alerts_days", 86400, "fired_ts"),
     ("universe_snapshots", "universe_days", 86400),
     ("venue_selection", "universe_days", 86400),
     ("feed_health_1m", "health_days", 86400),
