@@ -51,6 +51,21 @@ class DevServerTest(unittest.TestCase):
         for p in (f"/api/coin/{a}", f"/api/history/{a}?hours=1", f"/api/timeline/{a}"):
             self.assertEqual(self.get(p)[0], 200, p)
 
+    def test_radar_and_alert_routes(self):
+        radar = json.loads(self.get("/api/radar")[2])
+        self.assertIn(radar["state"], ("NONE", "WATCH", "CONFIRMING", "HIGH_CONVICTION", "INVALIDATED"))
+        self.assertEqual(radar["wallet"]["state"], "OFF")
+        al = json.loads(self.get("/api/alerts")[2])
+        self.assertIn("active", al)
+        self.assertIn("radar", al)
+        hist = json.loads(self.get("/api/alerts/history?days=7&limit=50")[2])
+        self.assertEqual(hist["days"], 7.0)
+        self.assertIsInstance(hist["alerts"], list)
+        self.assertIsInstance(hist["events"], list)
+        top = json.loads(self.get("/api/top")[2])
+        self.assertIn("radar", top)
+        self.assertEqual(top["wallet_intel"]["text"], "Wallet intel OFF")
+
     def test_static_and_errors(self):
         code, ctype, body = self.get("/")
         self.assertIn(b"Pre", body)

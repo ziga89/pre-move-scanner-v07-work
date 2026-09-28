@@ -32,9 +32,12 @@ class FastApiTest(unittest.TestCase):
                 a = rows[0]["asset"]
                 for p in (f"/api/coin/{a}", f"/api/history/{a}?hours=1", f"/api/timeline/{a}", "/api/health",
                           "/api/universe", "/api/state", "/api/outcomes", "/api/alerts", "/api/alerts/history",
+                          "/api/alerts/history?days=7&limit=10", "/api/radar",
                           "/api/version", "/", "/static/js/main.js",
                           "/manifest.json", "/sw.js"):
                     self.assertEqual(client.get(p).status_code, 200, p)
+                self.assertIn("state", client.get("/api/radar").json())
+                self.assertIn("alerts", client.get("/api/alerts/history").json())
                 self.assertEqual(client.get("/api/coin/NOPE").status_code, 404)
                 self.assertEqual(client.get("/api/history/QNT?hours=1000").status_code, 422)
                 with client.websocket_connect("/ws") as ws:

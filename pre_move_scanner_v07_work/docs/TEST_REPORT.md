@@ -1,5 +1,65 @@
 # v0.7 test report
 
+## v0.7.3: Signal Radar and wallet-intelligence states
+
+**Summary: 217 automated tests pass. 67 of them are new in v0.7.3, and 150 are the existing v0.7.1 /
+v0.7.2 tests.** The suite was run twice in the cloud container:
+* plain Python 3.11: 217 run, 7 skipped (the real-ccxt and FastAPI tests);
+* with ccxt 4.5.84 installed: 217 run, only the FastAPI test skipped. PyPI is not reachable from the
+  container; CI installs FastAPI.
+
+Also run:
+* the Playwright UI smoke test (SIM, all 40 checks);
+* `node --check` on every web module;
+* ESLint on `web/`;
+* `compileall`.
+
+GitHub Actions results are listed further down.
+
+### New tests
+
+| Area | Test file | What is proven |
+|---|---|---|
+| **Radar states** | `test_signal_radar.py` | NONE → WATCH → CONFIRMING → HIGH-CONVICTION → INVALIDATED. The headline priority. The invalidated entry is the headline for 10 min and listed until 15 min. The bar entry carries the asset, evidence, venues, persistence, reasons and wallet status. Disabled alerts never fire. |
+| **Persistence / hysteresis** | `test_signal_radar.py` | One failed check restarts the 120 s timer. An every-other-tick flicker never fires in 10 minutes. A dip under 60 s keeps the alert (shown as "dipping"); a longer one ends it as "composite confirmation faded". A re-fire needs a fresh 120 s. WATCH lingers on a soft dip only, and an ended setup must re-earn WATCH. |
+| **Stale feeds** | `test_signal_radar.py`, `test_service.py` | 3/4 feeds live blocks WATCH and the fire for 5 minutes. No data scores evidence 0. An active alert ends as "feeds stale / incomplete (2/4 selected venues live)". The sweep ends alerts of assets that stop updating ("no fresh data for 70s") or leave the universe. Stale WATCH / CONFIRMING entries drop off the bar. |
+| **Late rejection** | `test_signal_radar.py` | MOVING / IN_PROGRESS / LATE never reach WATCH and never fire, even at a pre-move score of 99. A missing late state is not "flat". A LATE move ends an alert immediately, even with a 600 s hysteresis, and records "+8.0% since fire". |
+| **Single-venue spike** | `test_signal_radar.py` | A pre-move score of 99 on one venue never reaches WATCH in 10 minutes. Neither does structure on one venue with confirmations elsewhere. |
+| **Single large trade** | `test_signal_radar.py` | A print that is 72 % of the tape never reaches WATCH and never fires. Spikes next to a real setup do not disturb it: only the real setup fires. |
+| **Market structure mandatory** | `test_signal_radar.py` | Buy flow on every venue without a book-side family, or with an order-book sub-score under 50, is not even WATCH. Supportive wallets do not replace structure. |
+| **CEX / MM reshuffling** | `test_signal_radar.py` | `RESHUFFLING` and `ROUTING` are neutral and listed as "not counted". MM `OFF_EXCHANGE` is never supportive, and the threshold stays at 86. CEX outflow to mostly **unlabelled** wallets (20 % attributed) is not supportive. Loud reshuffling with a weak market never fires. Only labelled-holder accumulation plus a drain or an attributed outflow is supportive (threshold 82). Hostile flow blocks WATCH. |
+| **Wallet states** | `test_wallet_status.py` | Each state and its reason: OFF, NO KEY, WARMING (lookup pending, lookup error being retried, first polls pending, "collecting transfer history (10/60 min)"), UNSUPPORTED (a native coin, a chain without a provider), N/A (no contract, a rejected contract whose on-chain symbol differs, no labels even with token-wide polling, no USD reference). Also: a real value with per-score N/A (no labelled market maker); "ON (partial)" while lagging; `gate_scores` never lets a non-OK value through; the coverage summary text and counts. |
+| **Contract discovery** | `test_wallet_status.py` | A native ERC-20 is accepted (lower-cased, with decimals). BTC, ETH and BNB are UNSUPPORTED with the reason. A Solana token is UNSUPPORTED, and so is a TRON token even though it has an ERC-20 bridged copy. A chain without a provider is UNSUPPORTED. An invalid address or a symbol mismatch is `not_found`. Lookups are paced (1 per run), configured tokens are never looked up, results are cached and honoured after a restart, re-checked after the 30-day TTL or a coin-id change, and errors are retried after 1 h, not before. |
+| **Providers / monitor** | `test_wallet_status.py` | Registry routing, keys, budget and `LookupError` for an unsupported chain. The Etherscan interface. `add_token`: a configured token wins, a duplicate contract is refused, a discovered token has token-wide polling off. |
+| **Whale candidates** | `test_wallet_status.py` | A $900k CEX → unlabelled transfer is listed as UNKNOWN / WHALE CANDIDATE, naming only the labelled exchange. The whale score stays 0 and the attributed share is 0. With CEX → CEX shifts excluded, the share is 0.5. |
+| **Storage** | `test_storage.py` | The alerts round trip (same id replaced, JSON columns). Open alerts are closed on restart. Retention uses `fired_ts`. `token_contracts` round trip. A **v0.7.2 database** (migration 1 only) is upgraded to migration 2 with its data kept, and re-opening applies nothing. |
+| **Service end-to-end (SIM)** | `test_service.py` | The radar and explicit OFF states in `/api/top`, the coin view and Health. A (forced) setup fires, is written to SQLite, is the radar headline, appears in `history().alerts` and in the ALERT timeline events, is invalidated through the normal path, and an alert left open is closed at the next start. |
+| **API** | `test_devserver.py`, `test_api_fastapi.py` | `/api/radar`, `/api/alerts` and `/api/alerts/history` (with `days` and `limit`) on both servers. |
+| **UI** | `tests/ui/smoke.mjs` | The radar is visible with a valid state and label on the overview, coin and Health views. Wallet cells show OFF (36 of 36). The coin wallet panel shows per-score OFF states and how to enable intel. Health shows the wallet-intelligence panel and the radar state. No JS errors, and no horizontal scroll at 390 px. |
+
+### Bugs found during this work (fixed, with tests)
+* The provided v0.7.2 counted MM `OFF_EXCHANGE` and unattributed CEX outflow as supportive wallet evidence.
+* It invalidated alerts on a missing late state.
+* Its coin charts filtered out the ALERT markers, and its dev server lacked `/api/alerts`.
+* During development: WATCH lingered for 20 s after an invalidation or a hard gate failure, and with no
+  labelled addresses and token-wide polling on, the wallet status stayed WARMING forever.
+
+### Preserved v0.7.1 fixes
+* `server/feeds/`, `server/selftest.py`, `tools/`, `run_windows.bat`, the requirements files and the CI
+  workflows have **zero diff** against v0.7.1.
+* The KuCoin lifecycle and stress tests, the real-ccxt local KuCoin-server tests, the Coinbase alias
+  tests, the MEXC protobuf check and the Windows launcher test all still pass.
+
+### Preserved v0.6 folder
+`sha256sum -c v06_manifest.sha256` passes for all 20 files, and `git diff e136c53 HEAD --
+pre_move_scanner_v06_history` is empty.
+
+### Not verifiable here
+* No live HIGH-CONVICTION alert has been observed; the thresholds are uncalibrated (see
+  `KNOWN_LIMITATIONS.md`).
+* Contract discovery against the live CoinGecko API and wallet states with a real `ETHERSCAN_API_KEY` need
+  your machine: open Health → *Wallet intelligence* after about 10 minutes.
+
 ## v0.7.1: KuCoin stream fix, verified against the real exchanges
 
 **Your report:** some live self-test runs lost every KuCoin stream with

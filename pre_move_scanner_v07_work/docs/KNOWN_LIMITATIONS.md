@@ -61,14 +61,35 @@ MEXC, HTX, Bitfinex, Bitstamp, Bitrue.
   Base, Avalanche, Linea, Scroll, Mantle, Blast are wired but Etherscan's free-tier chain coverage has
   changed over time — per-chain errors are shown on the Health page).
 * **Not supported**: Bitcoin, XRP Ledger, Solana, Cardano, TRON, TON, **XDC native chain**, Cosmos chains,
-  Hedera, and other non-EVM chains. For those coins MM / Whale / CEX / Scarcity are always **N/A**.
+  Hedera, and other non-EVM chains. For those coins MM / Whale / CEX / Scarcity show **UNSUPPORTED**, with
+  the reason. Native EVM gas coins (ETH, BNB, AVAX) are UNSUPPORTED too, because only ERC-20 transfers
+  are tracked.
 * Only labelled addresses you provide are monitored (plus optional token-wide polling for tokens with
-  manageable activity). Without labels the wallet columns stay N/A — by design.
+  manageable activity). Without labels the wallet columns stay N/A — by design. Discovery finds a token's
+  contract, but never labels a wallet. Large unlabelled counterparties of exchange transfers are listed
+  as UNKNOWN / WHALE CANDIDATE and are never counted.
+* Contract discovery trusts CoinGecko's `asset_platform_id` (the chain a token is native to) and then
+  re-checks the on-chain symbol. A token that is native to one EVM chain is monitored only there:
+  bridged supply on other chains is not tracked. A coin whose CoinGecko entry has no platform is treated
+  as a native coin (UNSUPPORTED).
 * DEX swap detection (BUY / SELL) requires labelled DEX pool / router addresses; swaps are not decoded.
 * A busy exchange hot wallet can have more transfers than one poll cycle can page through. Such addresses
   are flagged "lagging", and while they are, wallet scores are multiplied by 0.6 and marked "partial coverage".
 * Token-wide polling is switched off automatically for a token above 400 transfers per hour
   (`intel.token_wide_max_transfers_per_hour`); after that only address-centric monitoring runs for it.
+
+## Signal Radar / high-conviction alerts
+* The thresholds (score levels, venue counts, 120 s persistence, 60 s hysteresis) are set by hand and are
+  conservative. They are **not yet calibrated** on live outcomes. `signal_outcomes` records forward returns
+  for each fired alert so that they can be calibrated later.
+* The evidence score is a composite strength, not a probability, and never proof of a purchase.
+* **No live HIGH-CONVICTION alert has been observed yet.** The alert path is tested with fixtures, and end
+  to end in SIM with a forced setup. The strict checks were not relaxed for those tests.
+* By design, one selected venue that is not live blocks WATCH and HIGH-CONVICTION for that coin
+  (`alerts.min_selected_live_ratio` = 1.0). A flaky exchange can therefore hide a real setup; it cannot
+  create one.
+* Persistence means an alert fires at least 2 minutes after the structure appears. An open alert survives
+  a scanner restart only as a closed record; it is not resumed.
 
 ## Data-source assumptions
 * **CoinGecko**: market-cap ranking, prices and categories are taken as published. Free tiers are rate
@@ -79,6 +100,8 @@ MEXC, HTX, Bitfinex, Bitstamp, Bitrue.
   ±2 % depth demotes implausible markets but cannot detect all wash trading.
 * **Identity**: a market is the same asset only if its USD price is within ±5 % of CoinGecko's (±12 % for
   KRW). Legitimate large premiums/discounts would be rejected (reason shown).
+* **CoinGecko coin detail** (contract discovery): `asset_platform_id`, `platforms` and `detail_platforms`
+  as published; lookups are paced to 2 per minute on top of the ranking calls.
 * **Etherscan**: transfer lists and balances as published; free-tier limits (~5 calls/s, daily budget
   configurable, 90 000 by default).
 

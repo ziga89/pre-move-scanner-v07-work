@@ -4,10 +4,12 @@ import unittest
 
 from tests.helpers import T0, cfg, scratch_dir
 from server.storage.db import Database, Writer, prune
-from server.storage.history import (asset_history, asset_row_1m, event_row, events_query, fill_outcomes,
-                                    load_market_minutes, market_row_1m, venue_history)
+from server.storage.history import (alert_row, alerts_query, asset_history, asset_row_1m, close_open_alerts,
+                                    event_row, events_query, fill_outcomes, load_market_minutes,
+                                    load_token_contracts, market_row_1m, token_contract_row, venue_history)
 from server.storage.import_v06 import import_v06, sha256_file
-from server.storage.schema import ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_1M_COLS
+from server.storage.schema import (ALERT_COLS, ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_1M_COLS, MIGRATIONS,
+                                   TOKEN_CONTRACT_COLS)
 
 # Exact v0.6 DDL (from v0.6 server/app.py init_db)
 V06_DDL = """
@@ -151,6 +153,94 @@ class StorageTest(unittest.TestCase):
         fresh = MarketState("QNT", "x", "QNT/USDT", "USDT", lambda q: 1.0, c["engine"], c["feeds"], now=T0)
         fresh.rehydrate(rows, T0 + 12 * 60)
         self.assertTrue(fresh.base.warm)
+
+    # ---------------------------------------------------------------- v0.7.3
+    def _alert(self, aid="QNT-1", fired=T0, ended=None, state="HIGH_CONVICTION"):
+        return {"id": aid, "asset": "QNT", "state": state, "started_ts": fired - 120, "fired_ts": fired,
+                "updated_ts": fired, "ended_ts": ended, "duration_s": 120.0, "evidence_score": 81.5,
+                "peak_evidence": 83.0, "premove": 92.0, "peak_premove": 94.0, "price_at_fire": 100.0,
+                "price_at_end": None, "confirmed": 4, "coverage": 4, "coverage_total": 4,
+                "confirmed_venues": ["binance", "kraken"], "reasons": ["order-book 82", "buy pressure 78"],
+                "wallet_status": "unavailable", "wallet_state": "UNSUPPORTED", "structure_score": 80.0,
+                "execution_score": 75.0, "end_reason": None, "checks": {"venues": True}, "dipping": False}
+
+    def test_alerts_roundtrip_update_and_query(self):
+        al = self._alert()
+        self.db.insert("alerts", ALERT_COLS, [alert_row(al)], critical=True)
+        al2 = dict(al, state="INVALIDATED", ended_ts=T0 + 300, price_at_end=104.0,
+                   end_reason="price no longer flat: in progress (+4.0% since fire)")
+        self.db.insert("alerts", ALERT_COLS, [alert_row(al2)], critical=True)     # same id: replaced
+        self.db.insert("alerts", ALERT_COLS, [alert_row(self._alert("QNT-old", fired=T0 - 40 * 86400,
+                                                                    ended=T0 - 40 * 86400 + 60))])
+        self.db.flush()
+        rows = self.db.read_sync(alerts_query, T0 - 86400)
+        self.assertEqual([r["id"] for r in rows], ["QNT-1"])
+        r = rows[0]
+        self.assertEqual(r["state"], "INVALIDATED")
+        self.assertEqual(r["confirmed_venues"], ["binance", "kraken"])
+        self.assertEqual(r["checks"], {"venues": True})
+        self.assertEqual(r["wallet_state"], "UNSUPPORTED")
+        self.assertIn("price no longer flat", r["end_reason"])
+        self.assertEqual(len(self.db.read_sync(alerts_query, T0 - 50 * 86400)), 2)
+        self.assertEqual(self.db.read_sync(alerts_query, T0 - 50 * 86400, "BTC"), [])
+
+    def test_open_alerts_closed_at_restart(self):
+        self.db.insert("alerts", ALERT_COLS, [alert_row(self._alert())])
+        self.db.flush()
+        n = self.db.call(lambda c: close_open_alerts(c, T0 + 500, "scanner restarted"))
+        self.assertEqual(n, 1)
+        r = self.db.read_sync(alerts_query, T0 - 10)[0]
+        self.assertEqual((r["state"], r["ended_ts"], r["end_reason"]), ("INVALIDATED", T0 + 500, "scanner restarted"))
+        self.assertAlmostEqual(r["duration_s"], 620.0)
+        self.assertEqual(self.db.call(lambda c: close_open_alerts(c, T0 + 600, "again")), 0)
+
+    def test_alert_retention_uses_fired_ts(self):
+        c = cfg(storage={"alerts_days": 30})["storage"]
+        self.db.insert("alerts", ALERT_COLS, [alert_row(self._alert("a", fired=T0 - 31 * 86400, ended=T0 - 31 * 86400)),
+                                              alert_row(self._alert("b", fired=T0 - 29 * 86400, ended=T0 - 29 * 86400))])
+        self.db.flush()
+        removed = self.db.call(lambda con: prune(con, c, T0))
+        self.assertEqual(removed["alerts"], 1)
+        ids = self.db.read_sync(lambda con: [r[0] for r in con.execute("SELECT id FROM alerts")])
+        self.assertEqual(ids, ["b"])
+
+    def test_token_contracts_roundtrip(self):
+        d = {"asset": "QNT", "coingecko_id": "quant-network", "state": "supported", "chain": "ethereum",
+             "contract": "0x4a220e6096b25eadb88358cb44068a3248254675", "decimals": 18,
+             "reason": "native ethereum token", "source": "coingecko", "checked_ts": T0}
+        self.db.insert("token_contracts", TOKEN_CONTRACT_COLS, [token_contract_row(d)])
+        self.db.insert("token_contracts", TOKEN_CONTRACT_COLS, [token_contract_row(
+            {"asset": "BTC", "coingecko_id": "bitcoin", "state": "unsupported", "reason": "native coin"})])
+        self.db.flush()
+        got = self.db.read_sync(load_token_contracts)
+        self.assertEqual(got["QNT"], d)
+        self.assertEqual(got["BTC"]["state"], "unsupported")
+        self.assertIsNone(got["BTC"]["contract"])
+
+    def test_upgrade_from_v072_database_keeps_data(self):
+        """A v0.7.2 database has only migration 1: re-opening applies 2 and keeps every row."""
+        p = self.dir / "v072.db"
+        con = sqlite3.connect(p)
+        con.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_ts REAL, description TEXT)")
+        v, desc, sql = MIGRATIONS[0]
+        con.executescript(sql)
+        con.execute("INSERT INTO schema_migrations VALUES (?,?,?)", (v, T0, desc))
+        con.execute(f"INSERT INTO asset_metrics_5s ({','.join(ASSET_5S_COLS)}) VALUES ({','.join('?' * len(ASSET_5S_COLS))})",
+                    a5(T0))
+        con.commit()
+        con.close()
+        db = Database(p, cfg()["storage"])
+        try:
+            self.assertEqual(db.applied, [2])
+            n = db.read_sync(lambda c: c.execute("SELECT COUNT(*) FROM asset_metrics_5s").fetchone()[0])
+            self.assertEqual(n, 1)
+            tables = db.read_sync(lambda c: {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")})
+            self.assertTrue({"alerts", "token_contracts"} <= tables)
+        finally:
+            db.close()
+        db = Database(p, cfg()["storage"])
+        self.assertEqual(db.applied, [])
+        db.close()
 
     def test_outcomes_filled(self):
         self.db.call(lambda c: c.execute("INSERT INTO signal_outcomes (ts, asset, status, score, price) VALUES (?,?,?,?,?)",

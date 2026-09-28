@@ -141,8 +141,8 @@ def make_handler(runner: _Runner):
                 if p == "/api/alerts":
                     return self._json(runner.call(svc.alerts_payload))
                 if p == "/api/alerts/history":
-                    return self._json(runner.call(svc.alert_history, float(q.get("days", 30)),
-                                                  int(q.get("limit", 500))))
+                    return self._json(runner.call(svc.alert_history, min(365.0, max(1.0, float(q.get("days", 30)))),
+                                                  min(5000, max(1, int(q.get("limit", 500))))))
                 if p == "/api/radar":
                     return self._json(runner.call(svc.radar_payload))
                 if p == "/ws":

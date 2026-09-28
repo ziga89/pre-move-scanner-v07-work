@@ -19,7 +19,7 @@ export function openCoin(asset) {
 export function closeCoin() { clearInterval(histTimer); current = null; }
 export function currentCoin() { return current; }
 
-function kv(label, value) { return `<div><label>${esc(label)}</label><b>${value}</b></div>`; }
+function kv(label, value, cls = "") { return `<div${cls ? ` class="${cls}"` : ""}><label>${esc(label)}</label><b>${value}</b></div>`; }
 
 function head(d) {
   const r = d.returns || {};
@@ -36,8 +36,8 @@ function head(d) {
         ${kv("Confidence", num(d.confidence, 2))}
         ${kv("Late-move index", `${num(late.L, 2)} <span class="muted small">${esc(late.state || "")}</span>`)}
         ${kv("Price range vs normal", isNum(d.compression) ? num(d.compression, 2) + "×" : "—")}
-        ${kv("Signal Radar", radarText(d))}
-        ${kv("Wallet intel", walletState(d.wallet_status))}
+        ${kv("Signal Radar", radarText(d), "kv-wide")}
+        ${kv("Wallet intel", walletState(d.wallet_status), "kv-wide")}
       </div>
     </div>
     <div style="text-align:right">
@@ -55,13 +55,13 @@ function radarText(d) {
   const cls = { HIGH_CONVICTION: "ok", CONFIRMING: "", WATCH: "warn", INVALIDATED: "bad" }[e.state] || "";
   const ev = isNum(e.evidence_score) ? ` · evidence ${Number(e.evidence_score).toFixed(0)}/100` : "";
   const t = e.state === "INVALIDATED" ? ` · ${esc(e.end_reason || "")}` : e.state === "HIGH_CONVICTION" ? ` · held ${dur(e.persistence_s)}` : ` · ${dur(e.persistence_s)}`;
-  return `<b class="${cls}">${esc(lbl)}</b>${ev}${t}`;
+  return `<b class="${cls}">${esc(lbl)}</b><span class="kv-note">${ev}${t}</span>`;
 }
 
 function walletState(ws) {
   if (!ws) return `<span class="ws ws-warming">WARMING</span>`;
   return `<span class="ws ws-${esc(String(ws.state).toLowerCase())}" title="${esc(ws.reason || "")}">${esc(ws.label || ws.state)}</span>
-    <span class="muted small">${esc(ws.reason || "")}</span>`;
+    <span class="kv-note muted">${esc(ws.reason || "")}</span>`;
 }
 
 function why(d) {

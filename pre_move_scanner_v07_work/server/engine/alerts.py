@@ -41,6 +41,8 @@ LABELS = {"NONE": "NO HIGH-CONVICTION SETUP", "WATCH": "WATCH / CONFIRMING", "CO
           "HIGH_CONVICTION": "HIGH-CONVICTION BUY SETUP", "INVALIDATED": "INVALIDATED"}
 MOVE_STATES = {"MOVING", "IN_PROGRESS", "LATE"}          # price no longer flat
 BOOK_FAMILIES = {"thinning", "no_replenish", "bid_support"}
+# WATCH gates whose failure is never a "brief dip" (no linger on the radar)
+HARD_GATES = ("price_still_flat", "feed_complete", "not_one_print", "wallet_not_hostile")
 BASE_FAMILIES = {"thinning", "no_replenish", "buy_flow", "volume", "bid_support"}
 
 # Directions that count against a setup (a conservative veto may include unattributed flows).
@@ -276,12 +278,15 @@ class HighConvictionAlerts:
         persist_s = float(self.cfg.get("persistence_seconds", 120.0))
         clear_s = float(self.cfg.get("clear_after_seconds", 60.0))
 
-        # WATCH bookkeeping with a short linger so the radar does not flicker
+        # WATCH bookkeeping with a short linger so the radar does not flicker on a soft dip
+        # (score / venue count); a hard gate failure clears WATCH at once.
         if a["watch"] or a["strict"]:
             st["watch_since"] = st["watch_since"] or now
             st["watch_seen"] = now
-        elif st["watch_since"] is not None and now - (st["watch_seen"] or now) > float(self.cfg.get("watch_linger_seconds", 20.0)):
-            st["watch_since"] = None
+        elif st["watch_since"] is not None:
+            hard_fail = not all(a["gate"][g] for g in HARD_GATES)
+            if hard_fail or now - (st["watch_seen"] or now) > float(self.cfg.get("watch_linger_seconds", 20.0)):
+                st["watch_since"] = None
 
         if a["strict"]:
             st["bad_since"] = None
@@ -389,6 +394,7 @@ class HighConvictionAlerts:
         st["active"] = None
         st["candidate_since"] = None
         st["bad_since"] = None
+        st["watch_since"] = None          # an ended setup must re-earn WATCH
         return {"asset": al["asset"], "ts": now, "category": "ALERT", "event_type": "high_conviction_cleared",
                 "severity": 2, "level": al.get("evidence_score"),
                 "message": f"High-conviction setup INVALIDATED: {reason}",

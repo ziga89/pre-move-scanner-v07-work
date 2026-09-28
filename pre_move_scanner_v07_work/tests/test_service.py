@@ -63,6 +63,109 @@ class ServiceTest(unittest.TestCase):
                 await svc.stop()
         asyncio.run(go())
 
+    def test_radar_and_explicit_wallet_states_in_sim(self):
+        async def go():
+            svc = ScannerService(sim_cfg(self.d))
+            await svc.start()
+            try:
+                await asyncio.sleep(4)
+                top = svc.top_payload()
+                json.dumps(top)
+                self.assertIn(top["radar"]["state"], ("NONE", "WATCH", "CONFIRMING", "HIGH_CONVICTION", "INVALIDATED"))
+                self.assertTrue(top["radar"]["label"])
+                self.assertIn("feeds", top["radar"])
+                w = top["wallet_intel"]
+                self.assertEqual((w["state"], w["text"]), ("OFF", "Wallet intel OFF"))
+                self.assertEqual(w["by_state"], {"OFF": 5})
+                for r in top["rows"]:                  # explicit OFF, never a bare N/A
+                    self.assertEqual(r["wallet"]["state"], "OFF")
+                    for k in ("mm", "whale", "cex_flow", "scarcity"):
+                        self.assertEqual(r["wallet"]["scores"][k]["label"], "OFF")
+                coin = svc.coin_payload(top["rows"][0]["asset"])
+                self.assertEqual(coin["wallet_status"]["state"], "OFF")
+                self.assertIn("radar_entry", coin)
+                h = svc.health_payload()
+                self.assertEqual(h["wallet_intel"]["state"], "OFF")
+                self.assertIn("radar_state", h["alerts"])
+                self.assertEqual(h["etherscan"], {"enabled": False})
+                self.assertEqual(svc.radar_payload()["state"], top["radar"]["state"])
+            finally:
+                await svc.stop()
+        asyncio.run(go())
+
+    def test_alert_fires_persists_marks_history_and_closes_on_restart(self):
+        """Service plumbing: a (forced) setup fires, is written to SQLite, shows on the radar and the
+        chart history, ends through the normal invalidation path, and an alert left open is closed
+        at the next start. The strict checks themselves are covered in test_signal_radar."""
+        c = sim_cfg(self.d, alerts={"persistence_seconds": 2, "clear_after_seconds": 2})
+        forced = set()
+
+        def force(svc):
+            orig = svc.alerts.assess
+
+            def assess(res):
+                a = orig(res)
+                if res["asset"] in forced and res.get("premove") is not None:
+                    a = dict(a, strict=True, watch=True, checks={k: True for k in a["checks"]}, missing=[])
+                return a
+            svc.alerts.assess = assess
+
+        async def wait_for(pred, timeout=15.0):
+            for _ in range(int(timeout / 0.25)):
+                if pred():
+                    return True
+                await asyncio.sleep(0.25)
+            return False
+
+        async def run1():
+            svc = ScannerService(c)
+            force(svc)
+            await svc.start()
+            try:
+                await asyncio.sleep(3)
+                target = svc.top_payload()["rows"][0]["asset"]
+                forced.add(target)
+                self.assertTrue(await wait_for(lambda: svc.radar.get("state") == "HIGH_CONVICTION"))
+                self.assertEqual(svc.radar["primary"]["asset"], target)
+                self.assertEqual(svc.top_payload()["radar"]["label"], "HIGH-CONVICTION BUY SETUP")
+                self.assertIsNotNone(svc.coin_payload(target)["high_conviction_alert"])
+                forced.discard(target)                  # confirmation fades -> invalidated after 2 s
+                self.assertTrue(await wait_for(lambda: svc.alerts.get(target) is None))
+                self.assertEqual(svc.radar["state"], "INVALIDATED")
+                svc.db.flush()
+                hist = await svc.history(target, 1)
+                self.assertEqual(len(hist["alerts"]), 1)
+                al = hist["alerts"][0]
+                self.assertEqual(al["state"], "INVALIDATED")
+                self.assertTrue(al["end_reason"])
+                self.assertIsNotNone(al["fired_ts"])
+                kinds = {e["event_type"] for e in hist["events"] if e["category"] == "ALERT"}
+                self.assertEqual(kinds, {"high_conviction_buy_setup", "high_conviction_cleared"})
+                ah = await svc.alert_history(1)
+                self.assertEqual([a["id"] for a in ah["alerts"]], [al["id"]])
+                forced.add(target)                      # fire again and stop while it is open
+                self.assertTrue(await wait_for(lambda: svc.alerts.get(target) is not None))
+                svc.db.flush()
+                return target
+            finally:
+                forced.clear()
+                await svc.stop()
+
+        async def run2(target):
+            svc = ScannerService(c)
+            await svc.start()
+            try:
+                self.assertEqual(svc.status.get("alerts_closed_at_start"), 1)
+                rows = (await svc.alert_history(1))["alerts"]
+                self.assertEqual(len(rows), 2)
+                self.assertTrue(all(r["state"] == "INVALIDATED" and r["ended_ts"] for r in rows))
+                self.assertIn("scanner restarted", rows[0]["end_reason"])
+            finally:
+                await svc.stop()
+
+        target = asyncio.run(run1())
+        asyncio.run(run2(target))
+
     def test_top_ordering_puts_late_below_early(self):
         async def go():
             svc = ScannerService(sim_cfg(self.d))

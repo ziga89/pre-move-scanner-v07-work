@@ -6,7 +6,9 @@ Exchanges ──► universe/        catalogs (load_markets + fetch_tickers) →
    (ccxt)     feeds/           capability matrix → partitions → supervised book/trade loops → health
               engine/          MarketState per coin×venue (band book, rings, baselines, features)
               engine/          AssetState per coin (flags, aggregation, sub-scores, pipeline, status, events)
-Etherscan ──► intel/           labels → address-centric monitor → classifier → MM/Whale/CEX/Scarcity (null-aware)
+Etherscan ──► intel/           provider registry → labels → address-centric monitor → classifier → MM/Whale/CEX/Scarcity
+CoinGecko ──► intel/           contract discovery (native EVM tokens only) → status: OFF/NO KEY/WARMING/UNSUPPORTED/N/A/value
+              engine/alerts.py Signal Radar: WATCH / CONFIRMING / HIGH-CONVICTION / INVALIDATED → alerts table
               storage/         SQLite WAL, writer thread, rollups, retention, history, v0.6 import
               service.py       orchestration loops + payload builders
               app.py           FastAPI (REST + WebSocket topics)      devserver.py  stdlib fallback
@@ -43,6 +45,33 @@ web/                           Top table, coin detail, health, universe (vanilla
   subscribed symbol. Updates for symbols that weren't requested are counted, never dropped silently. A
   missing stream dependency (MEXC: `protobuf`) is reported as UNAVAILABLE with the reason.
 
+## Signal Radar and wallet status (v0.7.3)
+
+* **Per tick**, after an asset is scored, `service._intel_ctx` computes the wallet scores. `intel/status.asset_status`
+  then gives the asset and each score an explicit state, and `gate_scores` passes on only the values in
+  state OK (everything else is `None`). The state goes into `res["wallet_status"]`.
+* `HighConvictionAlerts.update(res, now)` assesses the result:
+  * 15 strict checks, and the WATCH gates (see `engine/alerts.py`);
+  * the wallet: only *attributed* accumulation is supportive, hostile flow vetoes, and reshuffling is
+    listed but never counted.
+
+  It then advances the per-asset state machine: WATCH (with a soft-dip linger) → CONFIRMING (120 s,
+  reset on any break) → HIGH_CONVICTION → INVALIDATED. Moves and hostile wallets end an alert immediately;
+  faded confirmation or incomplete feeds end it after 60 s of hysteresis.
+* After the asset loop, `sweep` ends the alerts of assets that stopped updating or left the universe.
+  `pop_changes()` hands fired / refreshed (every 30 s) / ended rows to the writer (`alerts` table,
+  `critical=True`). `radar(now, wallet_summary, feeds)` builds the headline state and the entries that
+  `/api/top` (every second), `/api/radar` and `/api/alerts` carry to the always-visible bar.
+* **Charts** draw each row of `/api/history/{asset}` → `alerts` as a band from `fired_ts` to `ended_ts`.
+  At start-up, `close_open_alerts` ends any alert the previous run left open.
+* **Contract discovery**: `_contracts_loop` runs every 60 s while a provider key is set. It asks
+  `ContractDiscovery` for up to `discovery_calls_per_minute` coin details (pinned coins, then anomalies,
+  then by rank), persists the decisions in `token_contracts`, and calls `IntelMonitor.add_token` for safe
+  native EVM tokens. The monitor verifies the on-chain symbol on the first transfer.
+* **Providers**: `intel/providers.ProviderRegistry` maps a chain to the provider that serves it (today
+  Etherscan V2 for 11 EVM chains). A new chain family plugs in with `supports / tokentx / tokenbalance /
+  stats`; status, discovery and the monitor need no change.
+
 ## Requirement → implementation map
 
 | Requirement | Where |
@@ -64,6 +93,12 @@ web/                           Top table, coin detail, health, universe (vanilla
 | History ≥ 7 days, timeline, precursors | `storage/*`, `engine/events.py` |
 | Scale path Top 250 / 500 | `engine/host.ProcessEngineHost` (`feeds.workers`) |
 | CI (amendment 9) | `.github/workflows/ci.yml` (repository root) |
+| Signal Radar states, persistence / hysteresis, late rejection (v0.7.3) | `engine/alerts.py`, `web/js/radar.js` |
+| Mandatory market structure, cross-venue, no single venue / single print (v0.7.3) | `alerts.assess` (`gate`, `checks`) |
+| Reshuffling never BUY (v0.7.3) | `alerts._wallet`, `intel/scores.cex_outflow_attributed_share` |
+| Alerts in SQLite + chart marks (v0.7.3) | `storage/schema.py` migration 2, `storage/history.alerts_query`, `web/js/charts.bands` |
+| Explicit wallet states + coverage (v0.7.3) | `intel/status.py`, `web/js/radar.walletCell`, Health panel |
+| EVM contract auto-discovery, provider abstraction (v0.7.3) | `intel/discovery.py`, `intel/providers.py` |
 
 ## Scoring details
 

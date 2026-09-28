@@ -41,20 +41,26 @@ warm-up (`engine.rehydrate_max_age_hours`).
 | Engine | ±2 % band order book: depth ±0.5/1/2 %, spread, imbalance, slippage, adds/removes, refill-after-fills, cancellation **proxy** with confidence, aggressive flow, trade count, volume acceleration — all relative to each market's own lagged baseline (30 m / 2 h / 24 h). |
 | Scoring | Order-book, liquidity, buy-pressure and cross-venue sub-scores → compression / wallet context → confidence → independent-signal / venue / liquidity-share caps → **late-move penalty last** (+5 %/15m, +8 %/30m, +12 %/1h hard limits **and** volatility-normalised displacement) → fast / slow persistence. |
 | Status | `EMERGING` (30–60 s early warning) · `CONFIRMED PRE-MOVE` / `STRONG PRE-MOVE` (persistent 2–3 min) · `WATCH` · `MOVE IN PROGRESS` · `LATE` · `LOW CONFIDENCE` · `WARMING` · `STALE`. |
-| Wallets (optional) | Labelled MM / CEX / custody / whale addresses via Etherscan V2; conservative classes (BUY, SELL, ACCUMULATION-SIDE, DISTRIBUTION-SIDE, SHIFT, UNKNOWN); MM / Whale / CEX-flow / Scarcity scores are **N/A** unless attribution is reliable. |
+| Signal Radar | Always-visible bar: `NO HIGH-CONVICTION SETUP` · `WATCH / CONFIRMING` · `HIGH-CONVICTION BUY SETUP` · `INVALIDATED`. A HIGH-CONVICTION setup needs mandatory multi-venue market structure, cross-venue confirmation, buy flow, complete feeds and a flat price, all held for 120 s. It is never raised from one venue, one print or wallet reshuffling. Alerts are stored in SQLite and drawn on the charts. |
+| Wallets (optional) | Labelled MM / CEX / custody / whale addresses via Etherscan V2. Transfer classes are conservative: BUY, SELL, ACCUMULATION-SIDE, DISTRIBUTION-SIDE, SHIFT, UNKNOWN. Every MM / Whale / CEX-flow / Scarcity cell shows an explicit state (**OFF · NO KEY · WARMING · UNSUPPORTED · N/A**) unless it holds a reliably attributed value. EVM token contracts are discovered automatically from the universe (native tokens only). Unknown large wallets stay **UNKNOWN / WHALE CANDIDATE**. |
 | History | SQLite (WAL): 5 s asset / 10 s venue rows (24–48 h), 1-minute rollups (30 / 14 days), 90-day event timeline, signal outcomes. v0.6 history can be imported read-only. |
 
 ## Dashboard
 
+* **Signal Radar** (top of every view): the headline state, the asset, the evidence score (a composite
+  strength, not a probability), the confirmed venues, the persistence time, the strongest reasons, and the
+  wallet-intelligence status and coverage. Click an entry to open the coin.
 * **Top anomalies right now** — Rank, Coin, Pre-Move, Liquidity, Order-book, Buy pressure, Cross-venue,
   MM, Whale, CEX flow, Price 15m, Price 1h, Venues (confirmed / live / selected), Reason, Status.
 * **Coin detail** — why-this-score reasons, the ordered score pipeline, sub-scores, history charts
   (1h / 6h / 24h / 7d: price & score, score breakdown, liquidity / buying pressure, volume & confirmations,
   spread & slippage, refill & cancel proxy, per-venue ask depth = *which exchange moved first*), venue
-  table with depth histograms, lead / lag, wallet panel, event timeline with breakout precursors, and
+  table with depth histograms, lead / lag, wallet panel (per-score state and reason, contract source,
+  whale candidates), high-conviction alert bands on the charts, event timeline with breakout precursors, and
   venue-selection reasons.
 * **Health** — per-exchange state, subscription modes, partitions, reconnects, errors; data-source budgets;
-  storage; FX.  **Universe** — the 100 members, pinned coins, and every excluded coin with its reason.
+  wallet-intelligence coverage (assets per state, labelled addresses, configured / discovered tokens,
+  discovery progress); storage; FX.  **Universe** — the 100 members, pinned coins, and every excluded coin with its reason.
 
 Phones: open `http://YOUR-PC-IP:8000` on the same Wi-Fi (PWA install needs HTTPS).
 

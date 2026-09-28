@@ -1,4 +1,127 @@
-# v0.7.2 — High-conviction alert rail
+# Changelog
+
+## v0.7.3 — Signal Radar, explicit wallet-intelligence states, contract discovery
+
+### Added
+* **Signal Radar**, an always-visible bar at the top of every view (overview, coin, health, universe).
+  One headline state at a time:
+  `NO HIGH-CONVICTION SETUP` · `WATCH / CONFIRMING` · `HIGH-CONVICTION BUY SETUP` · `INVALIDATED`.
+  The bar shows the asset, the evidence score (a composite strength, not a probability), the confirmed
+  venues (count and names), the persistence time (a progress bar while confirming), the strongest
+  reasons and the wallet-intelligence status. It also shows what is still missing, or why a setup ended.
+  Up to four other entries are listed as chips, with the wallet coverage text and the feed state. If the
+  bar is not refreshed for 15 s it says so. New endpoint: `/api/radar`.
+* **Radar logic** (`server/engine/alerts.py`, same `HighConvictionAlerts` API as v0.7.2):
+  * **WATCH** needs every mandatory gate:
+    * price still flat (only late state `FLAT` counts; an unknown state is not flat);
+    * every selected feed live;
+    * **market structure**: a book-side family (ask thinning / no replenishment / bid support) on at
+      least 2 venues, and an order-book sub-score of at least 50;
+    * at least 2 confirming venues;
+    * no single print dominating the tape;
+    * no hostile wallet flow;
+    * a pre-move score of at least 70.
+  * **CONFIRMING**: all 15 strict checks hold (unchanged from v0.7.2, including at least 3 confirming
+    venues and book-side and buy-flow families on at least 2 venues each). The 120 s persistence timer is
+    running, and any break resets it.
+  * **HIGH-CONVICTION BUY SETUP** fires only after 120 s of continuous strict confirmation.
+  * **INVALIDATED**:
+    * immediately when the price moves (`MOVING` / `IN_PROGRESS` / `LATE`, with the % move since the
+      fire) or the wallet flow turns hostile;
+    * after a 60 s hysteresis when the confirmation fades or the feeds stay incomplete;
+    * when an asset stops updating or leaves the universe.
+  * An invalidated setup is the headline for 10 min and stays listed for 15 min.
+  * WATCH lingers 20 s on a soft dip (score or venue count) so the bar does not flicker. A hard gate
+    failure clears it at once.
+* **Alert persistence**: a new `alerts` table (schema migration 2, applied automatically). Each alert is
+  written when it fires, every 30 s while open, and when it ends. The row keeps peak evidence, the price
+  at fire and at end, the confirmed venues, reasons, checks, wallet state and the end reason. Alerts left
+  open by a previous run are closed at start-up ("scanner restarted - setup not re-verified"). Retention
+  is `storage.alerts_days` (365).
+* **Alerts on the historical charts**: a green `HC` band on the price and score-breakdown charts from
+  the fire to the end, with a red dashed `✕` where the alert was invalidated. The data comes from the
+  alerts table (`/api/history/{asset}` returns `alerts`), so the band survives the 500-event cap. ALERT
+  events also appear as timeline markers.
+* `/api/alerts` and `/api/alerts/history` are kept. `/api/alerts/history` also returns the `alerts` rows
+  (`days` 1–365, `limit` 1–5000). The stdlib dev server now serves `/api/alerts`,
+  `/api/alerts/history` and `/api/radar`.
+* **Explicit wallet-intelligence states** replace the generic N/A, per asset and per score
+  (MM / whale / CEX flow / scarcity):
+  * `OFF`: disabled in the config;
+  * `NO KEY`: no `ETHERSCAN_API_KEY`;
+  * `WARMING`: contract lookup, first polls, or the history window (`intel.warmup_minutes`, 60) still
+    filling;
+  * `UNSUPPORTED`: the chain has no provider, or the asset is a native coin;
+  * `N/A`: no reliable attribution (no contract, no labelled addresses of the needed kind, no USD
+    reference);
+  * otherwise the real value.
+
+  The states are shown in the table cells, the coin view (per score, with the reason), the radar and a
+  new Health panel: assets per state, labelled addresses per chain, tokens (configured / discovered),
+  discovery progress, provider budgets and the last poll. Only values in state OK reach the scoring
+  engine and the radar; everything else is `None`, never 0.
+* **Automatic EVM contract discovery** (`server/intel/discovery.py`), which only runs where it is safe:
+  * It reads CoinGecko's coin detail for each universe coin.
+  * It accepts a token only if the token is *native* to a supported EVM chain (`asset_platform_id`), the
+    contract is a valid address and the symbol matches.
+  * Bridged copies of tokens that live on another chain are not tracked.
+  * Native coins (BTC, XRP, SOL, XDC, ...) and native EVM gas coins (ETH, BNB, AVAX) are UNSUPPORTED,
+    with the reason stated.
+  * The monitor re-checks the on-chain token symbol on the first transfer and rejects the contract if it
+    differs.
+  * Configured tokens (`intel.tokens`) always win.
+  * Results are cached in the new `token_contracts` table and re-checked after `discovery_ttl_days` (30).
+    Failed lookups are retried after 1 h.
+  * Lookups are paced to `discovery_calls_per_minute` (2) and run only while a provider key is set.
+    Pinned coins go first, then current anomalies, then by rank.
+* **Provider registry** (`server/intel/providers.py`). The monitor, the status resolver and discovery ask
+  the registry which provider serves a chain. Etherscan V2 serves the EVM chains today, and further chains
+  or providers plug in behind the same small interface.
+* **UNKNOWN / WHALE CANDIDATE**: large transfers (at least `intel.whale_candidate_usd`, 250,000) between
+  a labelled exchange and an unlabelled address are listed in the coin view. No identity is inferred,
+  and they are not counted in any score.
+
+### Fixed / changed relative to the provided v0.7.2
+* **Reshuffling counted as buying.** v0.7.2 treated market-maker `OFF_EXCHANGE` and *any* CEX outflow as
+  supportive, including outflow to unlabelled addresses, which may be the exchange's own wallets.
+  Now only attributed accumulation supports a setup:
+  * whale ACCUMULATION (labelled holders only) of at least 35;
+  * and either a real supply drain, or a CEX outflow of which at least 50 % reached labelled holders
+    (`cex_outflow_attributed_share`).
+
+  Market-maker direction, `ROUTING` and `RESHUFFLING` are never supportive; they are shown as
+  "reshuffling seen, not counted".
+* **Missing late data invalidated alerts.** A missing late-move state (no data) invalidated an active alert
+  immediately as "price moved". Only real MOVING / IN_PROGRESS / LATE states do that now. Missing data
+  goes through the hysteresis and ends as "feeds stale / incomplete".
+* **ALERT markers never reached the charts.** The coin view filtered ALERT markers out.
+* **The dev server returned 404 for `/api/alerts`.**
+* **Wallet status with no labelled addresses.** With token-wide polling on, an asset with no labelled
+  addresses showed WARMING forever. It is now N/A with the reason.
+* Health: the `etherscan` block reads the provider registry. Version 0.7.3, service-worker cache
+  `premove-v073`.
+
+### Preserved
+* The v0.7.1 KuCoin client lifecycle, MEXC protobuf, Coinbase USD↔USDC mapping and Windows launcher
+  fixes. `server/feeds/`, `server/selftest.py`, `tools/`, `run_windows.bat`, `requirements*.txt` and the
+  CI workflows are byte-identical to v0.7.1.
+* The preserved v0.6 history folder is unchanged (manifest check in `docs/TEST_REPORT.md`).
+
+### Tests
+* New `tests/test_signal_radar.py`: states and headline priority, persistence and hysteresis, stale
+  feeds and sweep, late rejection, single-venue and single-print spikes, mandatory market structure,
+  CEX / MM reshuffling, alert row persistence.
+* New `tests/test_wallet_status.py`: every wallet state, per-score N/A, value gating, coverage summary,
+  discovery decisions and pacing / TTL / retry, provider registry, `add_token`, whale candidates and
+  attributed share.
+* Storage: alerts round trip, restart close-out, retention by `fired_ts`, `token_contracts`, and an
+  upgrade from a v0.7.2 database.
+* Service (SIM): radar and OFF states end to end; an alert fires, is persisted, appears in the chart
+  history, is invalidated, and is closed on restart.
+* Dev-server and FastAPI routes; the Playwright UI smoke test checks the radar on every view and the
+  wallet states.
+
+## v0.7.2 — High-conviction alert rail (provided build)
 
 - Added a strict HIGH-CONVICTION BUY SETUP engine above the ordinary Pre-Move score.
 - Requires sustained cross-venue market structure + execution confirmation while price is still flat.
@@ -7,8 +130,6 @@
 - Added a sticky green global alert rail on every web view, click-through to coin detail, and green ALERT chart/timeline markers.
 - Added `/api/alerts` and `/api/alerts/history`; fired alerts are also stored in `signal_outcomes` for forward-return calibration.
 - Evidence score is explicitly a composite evidence strength, not a probability or guarantee.
-
-# Changelog
 
 ## v0.7.1 — KuCoin stream fix, client lifecycle, honest self-test
 

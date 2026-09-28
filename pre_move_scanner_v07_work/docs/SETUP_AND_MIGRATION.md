@@ -47,6 +47,26 @@ uvicorn server.app:app --host 0.0.0.0 --port 8000
 
 Windows: `setx ETHERSCAN_API_KEY "your-key"` (then open a new command prompt).
 
+Until both are set, the wallet cells say **OFF** (intel disabled) or **NO KEY**. They never show a bare
+N/A. With a key, EVM token contracts of the universe coins are discovered automatically through CoinGecko
+(`intel.auto_discover_contracts`, 2 lookups per minute, cached for 30 days). Scores still need reliable
+labelled addresses (see *Wallet labels*).
+
+## Upgrading from v0.7.1 / v0.7.2
+* Copy nothing: v0.7.3 uses the same folder layout, `config.json` and `data/scanner_v07.db`.
+* The database is upgraded automatically on the first start. Migration 2 adds the `alerts` and
+  `token_contracts` tables; no existing table is altered and no data is removed. There is no downgrade
+  step: v0.7.2 ignores the two new tables.
+* New optional config keys (defaults in `server/config.py`):
+  * `alerts.watch_min_premove`, `watch_min_confirmed_venues`, `watch_min_orderbook`,
+    `watch_linger_seconds`, `invalidated_display_seconds`, `invalidated_headline_seconds`,
+    `persist_update_seconds`;
+  * `storage.alerts_days`;
+  * `intel.warmup_minutes`, `auto_discover_contracts`, `discovery_calls_per_minute`,
+    `discovery_ttl_days`, `discovered_token_wide`, `whale_candidate_usd`.
+* A high-conviction alert that was open when the scanner stopped is closed at the next start ("scanner
+  restarted - setup not re-verified after restart"). It is never resumed unverified.
+
 ## Migration from v0.6
 
 | Topic | v0.6 | v0.7 |
@@ -73,18 +93,20 @@ period as dashed series with the label "v0.6", because the score formula changed
 **Database schema (new tables, versioned in `schema_migrations`)**: `asset_metrics_5s`,
 `market_metrics_10s`, `asset_metrics_1m`, `market_metrics_1m`, `events`, `universe_snapshots`,
 `venue_selection`, `feed_health_1m`, `wallet_labels`, `onchain_transfers`, `wallet_balances`,
-`intel_cursors`, `signal_outcomes`, `legacy_import`; plus the import targets `composite_history_v2`,
+`intel_cursors`, `signal_outcomes`, `legacy_import`, and since v0.7.3 `alerts` and `token_contracts`; plus the import targets `composite_history_v2`,
 `venue_history_v2`, `scanner_events_v2` (same columns as v0.6, with uniqueness indexes). No v0.6 table is
 altered or dropped.
 
 **Default retention** (`storage` section): 5 s asset rows 48 h, 10 s venue rows 24 h, 1-minute asset
-rollups 30 days, 1-minute venue rollups 14 days, events 90 days. Estimated steady-state size at Top 100 is
+rollups 30 days, 1-minute venue rollups 14 days, events 90 days, high-conviction alerts 365 days. Estimated steady-state size at Top 100 is
 about 1–1.5 GB (a calculation, not yet measured on a live run).
 
 ## Wallet labels
 Edit `labels/wallet_labels.csv` (`chain,address,entity,entity_type,confidence,source,notes`). Only add
 labels you trust. LOW-confidence and WATCH labels are shown but never drive classification or scores.
-Tokens to monitor: `intel.tokens` (the contract symbol is verified on the first transfer).
+Tokens to monitor: `intel.tokens` (the contract symbol is verified on the first transfer). Contracts
+discovered automatically are added on top. A configured token always wins over a discovered one.
+Existing reliable exchange / market-maker / custody labels are reused for every token on the same chain.
 
 ## Scaling beyond Top 100
 Set `"feeds": {"workers": 2}` (or more) to shard exchanges across processes, and `"universe":

@@ -34,7 +34,22 @@ check(["polling", "live"].includes((await page.textContent("#connection")).trim(
 const headers = await page.$$eval("#top-table thead th", t => t.map(x => x.textContent.trim()));
 for (const h of ["Pre‑Move", "Liquidity", "MM", "Whale", "CEX flow", "15m", "1h", "Venues", "Reason", "Status"])
   check(headers.includes(h), `column ${h}`);
-check((await page.$$(".na")).length > 0, "missing wallet intelligence rendered as N/A");
+// wallet intelligence is OFF in SIM: every wallet cell shows the explicit state, never a bare N/A
+const offCells = await page.$$eval("#top-table tbody tr .ws-off", c => c.length);
+check(offCells >= nrows * 3, `wallet cells show explicit OFF state (${offCells})`);
+// Signal Radar: always visible, one of the four headline labels, wallet coverage text
+const RADAR_LABELS = ["NO HIGH-CONVICTION SETUP", "WATCH / CONFIRMING", "HIGH-CONVICTION BUY SETUP", "INVALIDATED"];
+const radarCheck = async (where) => {
+  const r = await page.$("#radar");
+  check(!!r && await r.isVisible(), `Signal Radar visible on ${where}`);
+  const st = await page.$eval("#radar", el => el.dataset.state);
+  check(["NONE", "WATCH", "CONFIRMING", "HIGH_CONVICTION", "INVALIDATED"].includes(st), `radar state ${st} on ${where}`);
+  const label = (await page.textContent("#radar .r-state")).trim();
+  check(RADAR_LABELS.some(l => label.startsWith(l)), `radar label "${label}" on ${where}`);
+};
+await radarCheck("overview");
+check((await page.textContent("#radar")).includes("Wallet intel OFF"), "radar shows wallet-intel coverage (OFF)");
+check((await page.textContent("#radar")).includes("not proof of a purchase"), "radar carries the evidence caveat");
 await page.screenshot({ path: shots + "/ui_top.png", fullPage: false });
 
 // filters
@@ -53,7 +68,10 @@ check((await page.textContent("#coin-head")).includes(first), `coin view opens f
 await page.waitForSelector("#coin-venues table tbody tr", { timeout: 20000 });
 check((await page.$$("#coin-venues tbody tr")).length >= 1, "venue table rendered");
 check((await page.textContent("#coin-pipeline")).includes("Late‑move multiplier"), "score pipeline rendered");
-check((await page.textContent("#coin-wallet")).includes("disabled"), "wallet panel explains disabled intel");
+const cwt = await page.textContent("#coin-wallet");
+check(cwt.includes("OFF") && cwt.includes("intel.enabled"), "wallet panel shows explicit OFF state and how to enable");
+check((await page.$$("#coin-wallet .ws-off")).length >= 4, "wallet panel: per-score OFF states");
+await radarCheck("coin view");
 const cw = await page.$eval("#ch-price", c => c.width);
 check(cw > 200, "price/score chart drawn");
 for (const h of ["1", "24", "168"]) {
@@ -67,6 +85,9 @@ await page.screenshot({ path: shots + "/ui_coin.png", fullPage: true });
 await page.goto(base + "/#/health");
 await page.waitForSelector("#health table", { timeout: 10000 });
 check((await page.textContent("#health")).includes("simex_"), "health lists exchanges");
+check((await page.textContent("#health")).includes("Wallet intelligence"), "health shows wallet-intelligence coverage");
+check((await page.textContent("#health")).includes("Signal Radar"), "health shows radar state");
+await radarCheck("health view");
 await page.screenshot({ path: shots + "/ui_health.png", fullPage: true });
 await page.goto(base + "/#/universe");
 await page.waitForSelector("#universe table", { timeout: 10000 });

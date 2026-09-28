@@ -177,6 +177,18 @@ class ScannerService:
             return (0 if info.pinned else 1, -(self.results.get(a, {}).get("premove") or 0.0), info.rank or 9999)
         return [(a, self.info[a].coin_id) for a in sorted(self.info, key=prio) if self.info[a].coin_id]
 
+    async def _contracts_once(self, max_calls: int) -> List[Dict[str, Any]]:
+        """One discovery pass: look up to `max_calls` universe coins, track and persist the results."""
+        new = await self.contract_discovery.run_once(self._discovery_candidates(),
+                                                     configured=list(self.cfg["intel"].get("tokens") or {}),
+                                                     max_calls=max_calls)
+        for r in new:
+            self._track_discovered(r)
+        if new:
+            self.db.insert("token_contracts", TOKEN_CONTRACT_COLS, [token_contract_row(r) for r in new])
+            self._intel_cache.clear()
+        return new
+
     async def _contracts_loop(self) -> None:
         per_min = max(0.0, float(self.cfg["intel"].get("discovery_calls_per_minute", 2)))
         while True:
@@ -184,14 +196,7 @@ class ScannerService:
             if self.contract_discovery is None or per_min <= 0 or not (self.providers and self.providers.keyed()):
                 continue
             try:
-                new = await self.contract_discovery.run_once(self._discovery_candidates(),
-                                                             configured=list(self.cfg["intel"].get("tokens") or {}),
-                                                             max_calls=int(per_min))
-                for r in new:
-                    self._track_discovered(r)
-                if new:
-                    self.db.insert("token_contracts", TOKEN_CONTRACT_COLS, [token_contract_row(r) for r in new])
-                    self._intel_cache.clear()
+                await self._contracts_once(int(per_min))
             except Exception as exc:
                 self.status["contract_discovery_error"] = repr(exc)[:200]
 

@@ -71,6 +71,10 @@ def asset_status(asset: str, *, enabled: bool, keyed: bool, monitor: Any = None,
         return _all(NA, f"contract rejected: {tok['status']}", **extra)
     cov = monitor.coverage(asset)
     types = label_types(labels, chain) if labels is not None else {}
+    if labels is not None and not types:
+        # token-wide polling alone cannot attribute anything: every score needs reliable labels
+        return _all(NA, f"no reliable labelled exchange / MM / custody / whale addresses on {chain} "
+                        "(labels/wallet_labels.csv)", **extra)
     if not cov.get("covered"):
         reason = cov.get("reason", "")
         if "no successful polls" in reason:
