@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List
@@ -310,6 +311,11 @@ def load_config(root: Path, path: Path | None = None, create_if_missing: bool = 
             warnings.append(f"could not parse {path.name}: {exc!r}; using defaults")
             raw = {}
     cfg = deep_merge(DEFAULTS, _map_legacy(raw, warnings))
+    if os.environ.get("PMS_MODE", "").lower() == "sim":
+        # Offline demo: synthetic exchanges, separate database (never mixes with live history).
+        cfg = deep_merge(cfg, {"mode": "sim", "feeds": {"backend": "sim"}, "storage": {"path": "data/scanner_sim.db"},
+                               "intel": {"enabled": False}})
+        warnings.append("PMS_MODE=sim: synthetic market data, database data/scanner_sim.db")
     cfg["_meta"] = {"root": str(root), "path": str(path), "warnings": warnings}
     return cfg
 
