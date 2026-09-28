@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import time
 from typing import Any, Dict, Optional, Set
@@ -19,9 +20,11 @@ from aiohttp import WSMsgType, web
 
 
 class FakeKucoin:
-    def __init__(self, depth_interval: float = 0.02, trade_interval: float = 0.05):
+    def __init__(self, depth_interval: float = 0.02, trade_interval: float = 0.05, latency: Optional[float] = None):
         self.depth_interval = depth_interval
         self.trade_interval = trade_interval
+        # added delay for every REST response (robustness checks: FAKE_KUCOIN_LATENCY=0.5)
+        self.latency = float(os.environ.get("FAKE_KUCOIN_LATENCY", "0")) if latency is None else latency
         self.seq: Dict[str, int] = {}
         self.conns: Set[Any] = set()
         self.bullet_calls = 0
@@ -79,6 +82,7 @@ class FakeKucoin:
     # ---- REST
     async def _bullet(self, request: web.Request) -> web.Response:
         self.bullet_calls += 1
+        await asyncio.sleep(self.latency)
         if self.fail_bullets > 0:
             self.fail_bullets -= 1
             return web.json_response({"code": "500000", "msg": "internal error (injected)"}, status=500)
@@ -89,6 +93,7 @@ class FakeKucoin:
 
     async def _snapshot(self, request: web.Request) -> web.Response:
         self.snapshot_calls += 1
+        await asyncio.sleep(self.latency)
         mid = request.query.get("symbol", "")
         seq = self.seq.setdefault(mid, 1000)
         data = {"time": int(time.time() * 1000), "sequence": str(seq),

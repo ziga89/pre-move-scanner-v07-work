@@ -24,6 +24,10 @@ SYMS = ["QNT/USDT", "XDC/USDT", "LINK/USDT"]
 
 
 def kcfg(**kw):
+    # KuCoin's first book needs ~5 cached deltas + a REST snapshot; slower runners (Windows) need
+    # more than fast_cfg's 0.3 s watchdog, otherwise the watchdog replaces the client every time.
+    kw.setdefault("watchdog_min_seconds", 10.0)
+    kw.setdefault("stale_book_seconds", 2.0)
     return fast_cfg(exchange_overrides={"kucoin": {"subscribe_pace_s": 0.001}}, **kw)
 
 
