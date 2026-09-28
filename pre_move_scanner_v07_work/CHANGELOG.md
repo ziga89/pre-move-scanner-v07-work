@@ -15,6 +15,14 @@
   all KuCoin markets.
 * The self-test's realtime summary said PASS at ≥ 80 % of markets. It also missed mid-run status changes,
   because the feed manager binds its status callback at construction.
+* **Coinbase USDC pairs never streamed.** Coinbase serves `BASE/USDC` under `BASE-USD`, and ccxt resolves
+  the USDC request with a book and trades labelled `BASE/USD`. The multi-symbol loop discarded them
+  because that symbol wasn't subscribed. The USD↔USDC alias is now mapped back to the subscribed symbol,
+  and updates for unsubscribed symbols are counted (`unmatched_msgs`), never dropped silently.
+* **MEXC streams died as "ping-pong keepalive missing".** ccxt 4.5.84 decodes MEXC's spot stream as
+  protobuf but does not install it. The `NotSupported` error escapes ccxt's receive callback and the socket
+  is never read again. `requirements.txt` now includes `protobuf==5.29.5`. If the package is missing, MEXC
+  markets are `UNAVAILABLE` with that reason instead of timing out, and the self-test checks for it.
 
 ### Changed
 * `CcxtStreamClient` binds its ccxt instance to the running loop (`asyncio_loop` option plus an explicit
