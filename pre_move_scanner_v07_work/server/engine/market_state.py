@@ -87,7 +87,7 @@ class MarketState:
         self.band_pct = float(ecfg.get("band_pct", 2.0))
         self.book = BandBook(self.band_pct)
         self.flow = SecondRing(FLOW_FIELDS, FLOW_SECONDS)
-        self.mid_ring = PriceRing(3600)
+        self.mid_ring = PriceRing(3720)
         self.minutes = MinuteRing(MINUTE_FIELDS, int(ecfg.get("baseline_long_minutes", 1440)) + 30)
         self.base = Baselines(ecfg)
         self.stagger = int(stagger) % 60
@@ -454,6 +454,10 @@ class MarketState:
         cur_mid = self.mid_ring.latest()
         r1m = ((cur_mid / mid_1m - 1) * 100) if (cur_mid and mid_1m) else None
         r5m = ((cur_mid / mid_5m - 1) * 100) if (cur_mid and mid_5m) else None
+        rets = {}
+        for h in (15, 30, 60):
+            past = self.mid_ring.at_or_before(sec - h * 60, 90)
+            rets[h] = ((cur_mid / past - 1) * 100) if (cur_mid and past) else None
 
         depth1 = bd1 + ad1
         return {
@@ -478,7 +482,7 @@ class MarketState:
             "slippage_bps": slip, "slippage_q_usd": self.slip_q_usd,
             "book_rate_hz": book_rate, "book_age_s": (now - self.last_book_ts) if self.last_book_ts else None,
             "trade_age_s": (now - self.last_trade_ts) if self.last_trade_ts else None,
-            "r1m": r1m, "r5m": r5m,
+            "r1m": r1m, "r5m": r5m, "r15m": rets[15], "r30m": rets[30], "r60m": rets[60],
             # relative-to-own-baseline features
             "ask1_ratio": b.ratio("ask_depth_1", ad1), "ask1_z": b.z("ask_depth_1", ad1),
             "bid1_ratio": b.ratio("bid_depth_1", bd1), "bid1_z": b.z("bid_depth_1", bd1),

@@ -154,6 +154,7 @@ DEFAULTS: Dict[str, Any] = {
             "strong_min_families": 3,
             "strong_min_liquidity_share": 0.5,
             "low_confidence": 0.3,
+            "hysteresis": 5.0,
         },
         "onset_on": 0.40,
         "onset_off": 0.20,
