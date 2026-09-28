@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from . import __version__
 from .config import deep_merge, load_config
 from .service import ScannerService
 
@@ -117,7 +118,7 @@ def make_handler(runner: _Runner):
                 if p.startswith("/static/"):
                     return self._file(WEB / p[len("/static/"):])
                 if p == "/api/version":
-                    return self._json({"version": "0.7.0", "mode": "sim" if svc.sim else "live", "server": "devserver"})
+                    return self._json({"version": __version__, "mode": "sim" if svc.sim else "live", "server": "devserver"})
                 if p == "/api/top":
                     return self._json(runner.call(svc.top_payload))
                 if p.startswith("/api/coin/"):

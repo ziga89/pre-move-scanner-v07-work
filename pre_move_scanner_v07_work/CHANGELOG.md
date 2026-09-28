@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.7.1 — KuCoin stream fix, client lifecycle, honest self-test
+
+### Fixed
+* **KuCoin streams failed with `AttributeError: 'NoneType' object has no attribute 'create_task'`.**
+  Cause (reproduced with the real ccxt 4.5.84): stream clients receive the catalog's markets through
+  `set_markets()`, so ccxt never makes a REST request and never calls `open()`, which binds an instance
+  to the event loop. Most exchanges' watchers open the instance themselves. KuCoin's watchers first call
+  `negotiate()` → `spawn()` → `self.asyncio_loop.create_task(...)` while `asyncio_loop` is still `None`.
+  This failed every time KuCoin was actually streamed. It looked intermittent because whether KuCoin is
+  among a coin's selected venues depends on live volumes.
+* The error was treated as a transient network error. Every KuCoin loop retried the broken instance, the
+  watchdog rebuilt an identical broken one, and the failures tripped the partition's circuit breaker for
+  all KuCoin markets.
+* The self-test's realtime summary said PASS at ≥ 80 % of markets. It also missed mid-run status changes,
+  because the feed manager binds its status callback at construction.
+
+### Changed
+* `CcxtStreamClient` binds its ccxt instance to the running loop (`asyncio_loop` option plus an explicit
+  `open()`) before the first watch. It refuses use after `close()` or from another loop, and `close()` is
+  idempotent. Market sharing (no REST reload per connection) is kept.
+* New error class **client** (AttributeError, TypeError, ExchangeClosedByUser, closed / wrong-loop client).
+  The partition rebuilds its client once per generation, with backoff. Markets go `RECONNECTING` with the
+  real error text, never `UNAVAILABLE`.
+* Each stream loop is bound to its client generation, so it never touches a newer, closed or missing
+  client. Clients are closed exactly once before a replacement is created, and removing an exchange waits
+  for its loops to stop.
+* The circuit breaker trips only when a partition delivers **no data at all**, so one failing market cannot
+  take down the healthy ones.
+* Self-test: every feed incident is recorded. Each market and each exchange PASSes only without incidents,
+  with feed errors, client rebuilds, breaker trips and the last error shown. New options: `--repeat N` and
+  `--exchanges kucoin`.
+* New `tools/feed_stress.py`: a live start / resubscribe / stop-start / socket-drop / rebuild / new-manager
+  stress test with a Markdown / JSON report.
+
+### Tests
+* ccxt-free lifecycle model (reproduces the error) plus a 60-cycle start/stop stress test with faults.
+* The real ccxt KuCoin code against a local fake KuCoin server (token REST, snapshot REST, websocket), with
+  an 18-cycle stress test.
+* Self-test incident reporting.
+* A GitHub workflow runs the live tests against the real KuCoin, repeatedly, on Windows and Ubuntu runners.
+
 ## v0.7.0 — Top-100 pre-move universe scanner
 
 ### Scope
