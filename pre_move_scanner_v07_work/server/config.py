@@ -211,6 +211,7 @@ DEFAULTS: Dict[str, Any] = {
         "venues_per_asset": 4,
         "seed": 7,
         "scenarios": True,
+        "cycle_seconds": 3600,
         "speed": 1.0,
     },
 }

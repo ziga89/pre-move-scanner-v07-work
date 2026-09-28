@@ -13,7 +13,8 @@ def build_adapters(cfg: Dict[str, Any], clock=time.time, exchanges=None) -> Tupl
     if cfg.get("mode") == "sim" or cfg["feeds"].get("backend") == "sim":
         s = cfg.get("sim", {})
         world = SimWorld(n_assets=int(s.get("assets", 12)), venues_per_asset=int(s.get("venues_per_asset", 4)),
-                         seed=int(s.get("seed", 7)), scenarios=bool(s.get("scenarios", True)))
+                         seed=int(s.get("seed", 7)), scenarios=bool(s.get("scenarios", True)),
+                         cycle_seconds=float(s.get("cycle_seconds", 3600)))
         world.speed = float(s.get("speed", 1.0))
         driver = SimDriver(world, clock=clock, step_s=0.5)
         names = sorted({ex for ex, _ in world.markets})

@@ -193,6 +193,16 @@ SIM_COINS = [
 ]
 
 
+def sim_coins(n: int):
+    """The named coins, then generated ones (for scale tests beyond 15 assets)."""
+    out = list(SIM_COINS[:n])
+    i = 0
+    while len(out) < n:
+        i += 1
+        out.append((f"GEN{i:03d}", round(0.5 + (i * 7.3) % 90, 4)))
+    return out
+
+
 @dataclass
 class SimWorld:
     """Synthetic multi-coin, multi-venue world with optional scripted scenarios."""
@@ -201,11 +211,12 @@ class SimWorld:
     venues_per_asset: int = 4
     seed: int = 7
     scenarios: bool = True
+    cycle_seconds: float = 3600.0
     markets: Dict[Tuple[str, str], SimMarket] = field(default_factory=dict)
 
     def __post_init__(self):
         rng = random.Random(self.seed)
-        for i, (coin, price) in enumerate(SIM_COINS[: self.n_assets]):
+        for i, (coin, price) in enumerate(sim_coins(self.n_assets)):
             n_v = max(1, min(self.venues_per_asset, len(SIM_EXCHANGES)))
             exs = SIM_EXCHANGES[:n_v] if i % 3 else SIM_EXCHANGES[1:n_v + 1]
             for j, ex in enumerate(exs):
@@ -232,7 +243,7 @@ class SimWorld:
         if self.t0 is None:
             self.t0 = now
         el = now - self.t0
-        cycle = 3600.0
+        cycle = float(self.cycle_seconds)
         phase = (el % cycle) / cycle
         names = self.assets()
         if len(names) < 3:

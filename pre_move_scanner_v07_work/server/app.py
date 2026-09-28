@@ -1,326 +1,221 @@
+"""FastAPI application.
+
+Run:  uvicorn server.app:app --host 0.0.0.0 --port 8000
+
+WebSocket /ws protocol: the client sends {"subscribe": ["top", "coin:QNT", "health"]}
+(and optionally "unsubscribe"). Default subscription is "top". Each client has
+a latest-wins queue, so a slow phone drops frames instead of stalling others.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
-import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Set
+from typing import Any, Dict, Optional, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .multivenue import MultiVenueScanner
-from .onchain import EtherscanWatcher
+from . import __version__
+from .config import load_config
+from .service import ScannerService
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
-CONFIG_PATH = ROOT / "config.json"
 
-if not CONFIG_PATH.exists():
-    CONFIG_PATH.write_text((ROOT / "config.example.json").read_text())
 
-config = json.loads(CONFIG_PATH.read_text())
-scanner = MultiVenueScanner(config)
-onchain = EtherscanWatcher(config.get("onchain", {}))
+class _Client:
+    def __init__(self, ws: WebSocket):
+        self.ws = ws
+        self.topics: Set[str] = {"top"}
+        self.q: asyncio.Queue = asyncio.Queue(maxsize=2)
+        self.dropped = 0
 
-app = FastAPI(title="Pre-Move Scanner", version="0.4.0")
-app.mount("/static", StaticFiles(directory=WEB), name="static")
-
-clients: Set[WebSocket] = set()
-tasks = []
-
-@app.get("/")
-async def home():
-    return FileResponse(WEB / "index.html")
-
-@app.get("/manifest.json")
-async def manifest():
-    return FileResponse(WEB / "manifest.json", media_type="application/manifest+json")
-
-@app.get("/sw.js")
-async def sw():
-    return FileResponse(WEB / "sw.js", media_type="application/javascript")
-
-@app.get("/api/state")
-async def state():
-    snap = scanner.snapshot()
-    snap["onchain"] = onchain.snapshot()
-    snap["server_ts"] = time.time()
-    return snap
-
-@app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
-    await ws.accept()
-    clients.add(ws)
-    try:
-        while True:
-            await ws.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        clients.discard(ws)
-
-async def broadcaster():
-    while True:
-        payload = scanner.snapshot()
-        payload["onchain"] = onchain.snapshot()
-        payload["server_ts"] = time.time()
-        raw = json.dumps(payload)
-        stale=[]
-        for c in list(clients):
+    def offer(self, msg: str) -> None:
+        if self.q.full():
             try:
-                await c.send_text(raw)
-            except Exception:
-                stale.append(c)
-        for c in stale:
-            clients.discard(c)
-        await asyncio.sleep(config.get("sample_interval_seconds",1))
-
-def init_db():
-    con = sqlite3.connect(ROOT / "scanner.db")
-    con.execute("""
-      CREATE TABLE IF NOT EXISTS composite_history_v2 (
-        ts REAL,
-        asset TEXT,
-        price REAL,
-        score REAL,
-        coverage INTEGER,
-        confirmed_venues INTEGER,
-        bid_depth_1 REAL,
-        ask_depth_1 REAL,
-        ask_depth_ratio REAL,
-        buy_ratio_60s REAL,
-        volume_60s REAL,
-        volume_ratio REAL,
-        price_change_5m_pct REAL,
-        ask_replenishment REAL,
-        spread_bps REAL,
-        trade_confidence REAL,
-        components_json TEXT
-      )
-    """)
-    con.execute("""
-      CREATE INDEX IF NOT EXISTS idx_composite_hist_asset_ts
-      ON composite_history_v2(asset, ts)
-    """)
-    con.execute("""
-      CREATE TABLE IF NOT EXISTS venue_history_v2 (
-        ts REAL,
-        asset TEXT,
-        venue TEXT,
-        symbol TEXT,
-        confirmed INTEGER,
-        flags INTEGER,
-        bid_depth_1 REAL,
-        ask_depth_1 REAL,
-        ask_depth_ratio REAL,
-        buy_ratio_60s REAL,
-        volume_60s REAL,
-        volume_ratio REAL,
-        spread_bps REAL,
-        ask_replenishment REAL,
-        discovery_volume_24h_usd REAL
-      )
-    """)
-    con.execute("""
-      CREATE INDEX IF NOT EXISTS idx_venue_hist_asset_ts
-      ON venue_history_v2(asset, ts)
-    """)
-    con.execute("""
-      CREATE TABLE IF NOT EXISTS scanner_events_v2 (
-        ts REAL,
-        asset TEXT,
-        event_type TEXT,
-        level REAL,
-        message TEXT
-      )
-    """)
-    con.execute("""
-      CREATE INDEX IF NOT EXISTS idx_scanner_events_asset_ts
-      ON scanner_events_v2(asset, ts)
-    """)
-    con.commit()
-    con.close()
+                self.q.get_nowait()
+                self.dropped += 1
+            except asyncio.QueueEmpty:
+                pass
+        self.q.put_nowait(msg)
 
 
-_last_event_state = {}
+class WsHub:
+    def __init__(self, svc: ScannerService, cfg: Dict[str, Any]):
+        self.svc = svc
+        self.cfg = cfg
+        self.clients: Dict[int, _Client] = {}
 
-
-async def persister():
-    init_db()
-    every = max(2, int(config.get("persist_interval_seconds", 5)))
-
-    while True:
-        snap = scanner.snapshot()
-        composite_rows = []
-        venue_rows = []
-        event_rows = []
-
-        for asset, m in snap.get("assets", {}).items():
-            if m.get("score") is None:
+    async def run(self) -> None:
+        top_s = float(self.cfg["server"].get("broadcast_seconds", 1.0))
+        coin_s = float(self.cfg["server"].get("coin_broadcast_seconds", 2.0))
+        n = 0
+        while True:
+            await asyncio.sleep(top_s)
+            n += 1
+            if not self.clients:
                 continue
+            try:
+                if any("top" in c.topics for c in self.clients.values()):
+                    msg = json.dumps({"topic": "top", "data": self.svc.top_payload()})
+                    for c in self.clients.values():
+                        if "top" in c.topics:
+                            c.offer(msg)
+                if n % max(1, int(round(coin_s / top_s))) == 0:
+                    coins = {t for c in self.clients.values() for t in c.topics if t.startswith("coin:")}
+                    for t in coins:
+                        data = self.svc.coin_payload(t.split(":", 1)[1])
+                        if data is None:
+                            continue
+                        msg = json.dumps({"topic": t, "data": data})
+                        for c in self.clients.values():
+                            if t in c.topics:
+                                c.offer(msg)
+                if n % 5 == 0 and any("health" in c.topics for c in self.clients.values()):
+                    msg = json.dumps({"topic": "health", "data": self.svc.health_payload()})
+                    for c in self.clients.values():
+                        if "health" in c.topics:
+                            c.offer(msg)
+            except Exception as exc:  # never let a payload bug kill broadcasting
+                self.svc.status["ws_error"] = repr(exc)[:200]
 
-            ts = float(m["ts"])
-            composite_rows.append((
-                ts, asset, m.get("price"), m.get("score"),
-                m.get("coverage"), m.get("confirmed_venues"),
-                m.get("bid_depth_1"), m.get("ask_depth_1"),
-                m.get("ask_depth_ratio_vs_baseline"),
-                m.get("buy_ratio_60s"), m.get("volume_60s"),
-                m.get("volume_ratio_vs_baseline"),
-                m.get("price_change_5m_pct"), m.get("ask_replenishment"),
-                m.get("spread_bps"), m.get("trade_confidence"),
-                json.dumps(m.get("components", {}))
-            ))
+    async def serve(self, ws: WebSocket) -> None:
+        await ws.accept()
+        c = _Client(ws)
+        self.clients[id(ws)] = c
 
-            for v in m.get("venues", []):
-                venue_rows.append((
-                    ts, asset, v.get("venue"), v.get("symbol"),
-                    1 if v.get("confirmed") else 0, v.get("flags", 0),
-                    v.get("bid_depth_1"), v.get("ask_depth_1"),
-                    v.get("ask_depth_ratio"), v.get("buy_ratio_60s"),
-                    v.get("volume_60s"), v.get("volume_ratio"),
-                    v.get("spread_bps"), v.get("ask_replenishment"),
-                    v.get("volume_24h_discovery_usd")
-                ))
-
-            # Event markers: threshold crossings and confirmation-count changes.
-            prev = _last_event_state.get(asset, {"score": None, "confirmed": None})
-            score = float(m.get("score") or 0)
-            confirmed = int(m.get("confirmed_venues") or 0)
-
-            for threshold in (55, 70, 80):
-                pscore = prev.get("score")
-                if pscore is not None and pscore < threshold <= score:
-                    event_rows.append((
-                        ts, asset, "score_cross_up", threshold,
-                        f"Score crossed above {threshold}"
-                    ))
-                elif pscore is not None and pscore >= threshold > score:
-                    event_rows.append((
-                        ts, asset, "score_cross_down", threshold,
-                        f"Score fell below {threshold}"
-                    ))
-
-            pconf = prev.get("confirmed")
-            if pconf is not None and confirmed != pconf:
-                event_rows.append((
-                    ts, asset, "venue_confirmations", confirmed,
-                    f"Confirmed venues changed {pconf} → {confirmed}"
-                ))
-
-            _last_event_state[asset] = {"score": score, "confirmed": confirmed}
-
-        con = sqlite3.connect(ROOT / "scanner.db")
-        if composite_rows:
-            con.executemany(
-                "INSERT INTO composite_history_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                composite_rows
-            )
-        if venue_rows:
-            con.executemany(
-                "INSERT INTO venue_history_v2 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                venue_rows
-            )
-        if event_rows:
-            con.executemany(
-                "INSERT INTO scanner_events_v2 VALUES (?,?,?,?,?)",
-                event_rows
-            )
-
-        # Keep seven days of microstructure history.
-        cutoff = time.time() - 7 * 86400
-        con.execute("DELETE FROM composite_history_v2 WHERE ts < ?", (cutoff,))
-        con.execute("DELETE FROM venue_history_v2 WHERE ts < ?", (cutoff,))
-        con.execute("DELETE FROM scanner_events_v2 WHERE ts < ?", (cutoff,))
-        con.commit()
-        con.close()
-
-        await asyncio.sleep(every)
-
-
-def _downsample(rows, max_points=1800):
-    if len(rows) <= max_points:
-        return rows
-    step = max(1, len(rows) // max_points)
-    sampled = rows[::step]
-    if sampled[-1] != rows[-1]:
-        sampled.append(rows[-1])
-    return sampled
-
-
-@app.get("/api/history/{asset}")
-async def history(
-    asset: str,
-    hours: float = Query(6.0, ge=0.25, le=168.0),
-    max_points: int = Query(1800, ge=200, le=5000)
-):
-    asset = asset.upper()
-    since = time.time() - hours * 3600
-
-    con = sqlite3.connect(ROOT / "scanner.db")
-    con.row_factory = sqlite3.Row
-
-    comp = con.execute("""
-        SELECT * FROM composite_history_v2
-        WHERE asset=? AND ts>=?
-        ORDER BY ts ASC
-    """, (asset, since)).fetchall()
-
-    venue = con.execute("""
-        SELECT * FROM venue_history_v2
-        WHERE asset=? AND ts>=?
-        ORDER BY ts ASC
-    """, (asset, since)).fetchall()
-
-    events = con.execute("""
-        SELECT * FROM scanner_events_v2
-        WHERE asset=? AND ts>=?
-        ORDER BY ts ASC
-    """, (asset, since)).fetchall()
-    con.close()
-
-    comp = _downsample([dict(x) for x in comp], max_points)
-
-    # Venue data is grouped and downsampled per venue.
-    by_venue = {}
-    for r in venue:
-        d = dict(r)
-        by_venue.setdefault(d["venue"], []).append(d)
-    by_venue = {
-        k: _downsample(v, max(250, max_points // 2))
-        for k, v in by_venue.items()
-    }
-
-    for r in comp:
+        async def sender():
+            while True:
+                msg = await c.q.get()
+                await ws.send_text(msg)
+        st = asyncio.create_task(sender())
         try:
-            r["components"] = json.loads(r.pop("components_json") or "{}")
+            c.offer(json.dumps({"topic": "top", "data": self.svc.top_payload()}))
+            while True:
+                raw = await ws.receive_text()
+                try:
+                    m = json.loads(raw)
+                except ValueError:
+                    continue  # v0.6 clients send "hello"/"ping"
+                if not isinstance(m, dict):
+                    continue
+                for t in m.get("subscribe", []) or []:
+                    c.topics.add(str(t))
+                    if str(t).startswith("coin:"):
+                        data = self.svc.coin_payload(str(t).split(":", 1)[1])
+                        if data is not None:
+                            c.offer(json.dumps({"topic": str(t), "data": data}))
+                for t in m.get("unsubscribe", []) or []:
+                    c.topics.discard(str(t))
+        except WebSocketDisconnect:
+            pass
         except Exception:
-            r["components"] = {}
-
-    return {
-        "asset": asset,
-        "hours": hours,
-        "composite": comp,
-        "venues": by_venue,
-        "events": [dict(x) for x in events],
-    }
+            pass
+        finally:
+            st.cancel()
+            self.clients.pop(id(ws), None)
 
 
-@app.on_event("startup")
-async def startup():
-    tasks.extend([
-        asyncio.create_task(scanner.run()),
-        asyncio.create_task(broadcaster()),
-        asyncio.create_task(persister()),
-        asyncio.create_task(onchain.run()),
-    ])
+def create_app(cfg: Optional[Dict[str, Any]] = None, service: Optional[ScannerService] = None,
+               start_service: bool = True) -> FastAPI:
+    cfg = cfg or load_config(ROOT)
+    svc = service or ScannerService(cfg)
+    hub = WsHub(svc, cfg)
 
-@app.on_event("shutdown")
-async def shutdown():
-    await scanner.close()
-    await onchain.close()
-    for t in tasks:
-        t.cancel()
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = None
+        if start_service:
+            await svc.start()
+            task = asyncio.create_task(hub.run())
+        try:
+            yield
+        finally:
+            if task:
+                task.cancel()
+            if start_service:
+                await svc.stop()
+
+    app = FastAPI(title="Pre-Move Scanner", version=__version__, lifespan=lifespan)
+    app.state.service = svc
+    app.state.hub = hub
+    app.mount("/static", StaticFiles(directory=WEB), name="static")
+
+    @app.get("/")
+    async def home():
+        return FileResponse(WEB / "index.html")
+
+    @app.get("/manifest.json")
+    async def manifest():
+        return FileResponse(WEB / "manifest.json", media_type="application/manifest+json")
+
+    @app.get("/sw.js")
+    async def sw():
+        return FileResponse(WEB / "sw.js", media_type="application/javascript")
+
+    @app.get("/api/version")
+    async def version():
+        return {"version": __version__, "mode": "sim" if svc.sim else "live"}
+
+    @app.get("/api/top")
+    async def top():
+        return svc.top_payload()
+
+    @app.get("/api/coin/{asset}")
+    async def coin(asset: str):
+        data = svc.coin_payload(asset)
+        if data is None:
+            raise HTTPException(404, f"{asset.upper()} is not in the scanned universe")
+        return data
+
+    @app.get("/api/history/{asset}")
+    async def history(asset: str, hours: float = Query(6.0, ge=0.25, le=168.0),
+                      max_points: int = Query(1500, ge=100, le=5000)):
+        return await svc.history(asset, hours, max_points)
+
+    @app.get("/api/timeline/{asset}")
+    async def timeline(asset: str, hours: float = Query(24.0, ge=0.25, le=24 * 90)):
+        return await svc.timeline(asset, hours)
+
+    @app.get("/api/health")
+    async def health():
+        return svc.health_payload()
+
+    @app.get("/api/universe")
+    async def universe():
+        return svc.universe_payload()
+
+    @app.get("/api/outcomes")
+    async def outcomes(days: float = Query(30.0, ge=1, le=365)):
+        return await svc.outcomes(days)
+
+    @app.get("/api/crosscheck/{asset}")
+    async def crosscheck(asset: str):
+        return {"asset": asset.upper(), "unsupported_top": await svc.crosscheck(asset.upper())}
+
+    @app.get("/api/state")
+    async def state():
+        return svc.state_compat()
+
+    @app.websocket("/ws")
+    async def ws_endpoint(ws: WebSocket):
+        await hub.serve(ws)
+
+    return app
+
+
+_app: Optional[FastAPI] = None
+
+
+def __getattr__(name: str):
+    # `uvicorn server.app:app` — created lazily so importing this module in
+    # tests does not start anything or touch config/database files.
+    global _app
+    if name == "app":
+        if _app is None:
+            _app = create_app()
+        return _app
+    raise AttributeError(name)

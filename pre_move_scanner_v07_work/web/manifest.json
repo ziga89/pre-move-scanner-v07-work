@@ -1,9 +1,9 @@
 {
-  "name": "Pre-Move Scanner",
+  "name": "Pre-Move Scanner v0.7",
   "short_name": "PreMove",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0b0f14",
   "theme_color": "#0b0f14",
-  "description": "Real-time crypto order-book and flow anomaly scanner"
+  "description": "Top-100 crypto pre-move anomaly scanner: abnormal market structure while price is still flat"
 }

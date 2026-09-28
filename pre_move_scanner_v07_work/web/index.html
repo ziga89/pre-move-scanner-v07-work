@@ -7,83 +7,107 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0f14'/%3E%3Cpath d='M5 22h6l3-9 4 12 3-7h6' fill='none' stroke='%23f5c451' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/styles.css">
-  <title>Pre‑Move Scanner v0.4</title>
+  <title>Pre‑Move Scanner v0.7</title>
 </head>
 <body>
 <header>
-  <div>
-    <h1>Pre‑Move Scanner <span class="vtag">v0.4</span></h1>
-    <p>Per‑coin Top‑5 volume composite · venues discovered automatically</p>
+  <div class="brand">
+    <h1>Pre‑Move Scanner <span class="vtag">v0.7</span> <span id="mode" class="modetag"></span></h1>
+    <p>Top‑100 universe · abnormal structure while price is still flat</p>
   </div>
+  <nav>
+    <a href="#/" data-view="top">Anomalies</a>
+    <a href="#/health" data-view="health">Health</a>
+    <a href="#/universe" data-view="universe">Universe</a>
+  </nav>
   <div class="status"><span id="dot"></span><span id="connection">connecting…</span></div>
 </header>
-<section class="explain">
-  <div><b>One coin = one signal.</b> For each coin, the scanner automatically chooses its highest‑volume supported spot markets.</div>
-  <div class="legend"><span>0–39 normal</span><span>40–54 interesting</span><span>55–69 watch</span><span>70–79 strong</span><span>80+ extreme</span></div>
-</section>
+
 <main>
-  <div id="cards" class="cards"></div>
-
-  <section class="panel history-panel">
-    <div class="history-head">
-      <div>
-        <h2>Market history</h2>
-        <div id="history-subtitle" class="muted">Click a coin card to inspect its history.</div>
-      </div>
-      <div class="range-buttons">
-        <button data-hours="1">1h</button>
-        <button data-hours="6" class="active">6h</button>
-        <button data-hours="24">24h</button>
-        <button data-hours="168">7d</button>
-      </div>
-    </div>
-
-    <div class="history-grid">
-      <div class="chartbox">
-        <div class="charttitle">Price</div>
-        <canvas id="chart-price"></canvas>
-      </div>
-      <div class="chartbox">
-        <div class="charttitle">Pre‑Move score</div>
-        <canvas id="chart-score"></canvas>
-      </div>
-      <div class="chartbox">
-        <div class="charttitle">Liquidity / buying pressure</div>
-        <canvas id="chart-flow"></canvas>
-      </div>
-      <div class="chartbox">
-        <div class="charttitle">Volume / venue confirmations</div>
-        <canvas id="chart-volume"></canvas>
+  <section id="view-top" class="view">
+    <div class="toolbar">
+      <h2>Top anomalies right now</h2>
+      <div class="filters">
+        <input id="f-search" type="search" placeholder="Search coin" aria-label="Search coin">
+        <select id="f-status" aria-label="Status filter">
+          <option value="">All statuses</option>
+          <option value="premove">Pre-move signals only</option>
+          <option value="STRONG PRE-MOVE">STRONG PRE-MOVE</option>
+          <option value="CONFIRMED PRE-MOVE">CONFIRMED PRE-MOVE</option>
+          <option value="EMERGING">EMERGING</option>
+          <option value="WATCH">WATCH</option>
+          <option value="LATE">LATE / MOVE IN PROGRESS</option>
+          <option value="LOW CONFIDENCE">LOW CONFIDENCE</option>
+        </select>
+        <label class="chk"><input id="f-hide-late" type="checkbox" checked> hide late moves</label>
+        <label class="chk"><input id="f-pinned" type="checkbox"> pinned only</label>
       </div>
     </div>
-
-    <div class="panel history-details">
-      <h2>Venue history</h2>
-      <div id="venue-history-legend" class="muted">No coin selected.</div>
-      <canvas id="chart-venues"></canvas>
+    <div id="summary" class="summary"></div>
+    <div class="tablewrap">
+      <table id="top-table" class="grid-table">
+        <thead><tr>
+          <th data-sort="position">#</th><th data-sort="asset">Coin</th><th data-sort="premove" class="num">Pre‑Move</th>
+          <th data-sort="liquidity" class="num">Liquidity</th><th data-sort="orderbook" class="num">Order‑book</th>
+          <th data-sort="buy_pressure" class="num">Buy press.</th><th data-sort="cross_venue" class="num">Cross‑venue</th>
+          <th data-sort="mm" class="num">MM</th><th data-sort="whale" class="num">Whale</th><th data-sort="cex_flow" class="num">CEX flow</th>
+          <th data-sort="r15" class="num">15m</th><th data-sort="r60" class="num">1h</th><th data-sort="confirmed" class="num">Venues</th>
+          <th>Reason</th><th data-sort="status">Status</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
     </div>
+    <p class="muted small">Ranked by Pre‑Move score (early structure while price is flat), not by market cap.
+      LATE / MOVE IN PROGRESS rows sort below every early signal. <b>N/A</b> = no reliable data (never treated as 0).</p>
+  </section>
 
+  <section id="view-coin" class="view" hidden>
+    <a href="#/" class="back">← Anomalies</a>
+    <div id="coin-head" class="panel coin-head"></div>
+    <div class="coin-grid">
+      <div class="panel"><h3>Why this score</h3><div id="coin-why"></div></div>
+      <div class="panel"><h3>Score pipeline</h3><div id="coin-pipeline"></div></div>
+    </div>
+    <div class="panel"><h3>Sub‑scores</h3><div id="coin-subs" class="subs"></div></div>
     <div class="panel">
-      <h2>Detected events</h2>
-      <div id="history-events" class="muted">No events yet.</div>
+      <div class="history-head">
+        <h3>History</h3>
+        <div class="range-buttons">
+          <button data-hours="1">1h</button><button data-hours="6" class="active">6h</button>
+          <button data-hours="24">24h</button><button data-hours="168">7d</button>
+        </div>
+      </div>
+      <div id="history-subtitle" class="muted small"></div>
+      <div class="history-grid">
+        <div class="chartbox"><div class="charttitle">Price &amp; Pre‑Move score</div><canvas id="ch-price"></canvas></div>
+        <div class="chartbox"><div class="charttitle">Score breakdown</div><canvas id="ch-subs"></canvas></div>
+        <div class="chartbox"><div class="charttitle">Liquidity / buying pressure</div><canvas id="ch-flow"></canvas></div>
+        <div class="chartbox"><div class="charttitle">Volume / confirmed venues</div><canvas id="ch-volume"></canvas></div>
+        <div class="chartbox"><div class="charttitle">Spread (bps) &amp; buy‑side slippage (× normal)</div><canvas id="ch-spread"></canvas></div>
+        <div class="chartbox"><div class="charttitle">Refill after fills &amp; cancellation proxy (est.)</div><canvas id="ch-repl"></canvas></div>
+      </div>
+      <div class="chartbox wide"><div class="charttitle">Per‑venue ask depth vs its own baseline — which exchange moved first</div>
+        <canvas id="ch-venues"></canvas><div id="venue-legend" class="muted small"></div></div>
     </div>
+    <div class="panel"><h3>Venues</h3><div id="coin-venues"></div></div>
+    <div class="coin-grid">
+      <div class="panel"><h3>Cross‑exchange lead / lag</h3><div id="coin-leadlag"></div></div>
+      <div class="panel"><h3>Wallet / MM / CEX intelligence</h3><div id="coin-wallet"></div></div>
+    </div>
+    <div class="panel"><h3>Event timeline</h3><div id="coin-timeline" class="timeline"></div></div>
+    <div class="panel"><h3>Venue selection</h3><div id="coin-selection"></div></div>
   </section>
 
-  <section class="panel">
-    <h2>Known-wallet flows</h2>
-    <div id="onchain-status" class="muted">Optional.</div>
-    <div id="flows"></div>
-  </section>
-  <section class="panel">
-    <h2>Composite logic</h2>
-    <p>
-      The score is liquidity-weighted across the major spot venues. A tiny exchange cannot create a
-      high score by itself. Strong scores require the same type of anomaly to appear across multiple
-      venues while the price has not already escaped.
-    </p>
-  </section>
+  <section id="view-health" class="view" hidden><div id="health"></div></section>
+  <section id="view-universe" class="view" hidden><div id="universe"></div></section>
 </main>
-<script src="/static/app.js"></script>
+<footer class="muted small">
+  Research instrument, not trading advice. Thin books can reflect volatility controls, market‑maker risk
+  reduction, maintenance or delistings; wallet transfers can be custody / internal moves. Cancellations are
+  estimated (removed liquidity minus aggressive fills), never proven.
+</footer>
+<script type="module" src="/static/js/main.js"></script>
 </body>
 </html>
