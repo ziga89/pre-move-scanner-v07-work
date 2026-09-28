@@ -57,6 +57,8 @@
     "etherscan_api_key_env": "ETHERSCAN_API_KEY",
     "labels_file": "labels/wallet_labels.csv",
     "daily_call_budget": 90000,
+    "auto_discover_contracts": true,
+    "warmup_minutes": 60,
     "tokens": {
       "QNT": {
         "chain": "ethereum",
@@ -73,6 +75,7 @@
   "alerts": {
     "enabled": true,
     "persistence_seconds": 120,
+    "clear_after_seconds": 60,
     "min_confirmed_venues": 3,
     "min_premove_with_wallet": 82,
     "min_premove_wallet_neutral": 86,

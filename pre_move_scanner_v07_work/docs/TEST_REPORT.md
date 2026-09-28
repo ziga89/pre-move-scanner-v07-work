@@ -14,7 +14,15 @@ Also run:
 * ESLint on `web/`;
 * `compileall`.
 
-GitHub Actions results are listed further down.
+**GitHub Actions**, commit 40ad038, run 11 of `v0.7 CI`: **all 8 jobs passed.**
+* The full suite on Windows and Ubuntu × Python 3.11 / 3.12 / 3.13, with FastAPI, WebSocket, real ccxt
+  and worker processes. This is where the FastAPI route test with `/api/radar` and
+  `/api/alerts/history` ran.
+* The capability matrix and the offline self-test.
+* On Windows, the launcher end to end: a fresh venv, `selftest --assets QNT,XDC,LINK`, 2 of 2 clean
+  rounds.
+* JS syntax, ESLint 9 and the Playwright UI smoke test.
+* The v0.6 manifest check.
 
 ### New tests
 
