@@ -5,11 +5,11 @@ errors (NOTOK) are reported instead of failing silently.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from typing import Any, Dict, List, Optional
 
 from ..universe.http import HttpClient, HttpError
+from ..env import env_secret
 
 BASE = "https://api.etherscan.io/v2/api"
 CHAIN_IDS = {"ethereum": 1, "bsc": 56, "polygon": 137, "arbitrum": 42161, "optimism": 10, "base": 8453,
@@ -36,7 +36,7 @@ class EtherscanClient:
     def __init__(self, http: HttpClient, icfg: Dict[str, Any], clock=time.time, sleep=asyncio.sleep,
                  budget_store: Optional[Dict[str, int]] = None):
         self.http = http
-        self.key = os.getenv(str(icfg.get("etherscan_api_key_env", "ETHERSCAN_API_KEY")), "")
+        self.key = env_secret(icfg.get("etherscan_api_key_env"), "ETHERSCAN_API_KEY")
         self.cps = max(0.2, float(icfg.get("calls_per_second", 4.0)))
         self.daily = int(icfg.get("daily_call_budget", 90000))
         self.clock = clock

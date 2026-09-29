@@ -8,11 +8,11 @@ HTTP 429 triggers exponential backoff honouring Retry-After.
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from typing import Any, Dict, List, Optional
 
 from .http import HttpClient, HttpError
+from ..env import env_secret
 
 PUBLIC = "https://api.coingecko.com/api/v3"
 PRO = "https://pro-api.coingecko.com/api/v3"
@@ -21,7 +21,7 @@ PRO = "https://pro-api.coingecko.com/api/v3"
 class CoinGeckoClient:
     def __init__(self, http: HttpClient, ucfg: Dict[str, Any], clock=time.monotonic, sleep=asyncio.sleep):
         self.http = http
-        key = os.getenv(str(ucfg.get("coingecko_api_key_env", "COINGECKO_API_KEY")), "")
+        key = env_secret(ucfg.get("coingecko_api_key_env"), "COINGECKO_API_KEY")
         self.key_type = str(ucfg.get("coingecko_api_key_type", "demo")).lower()
         self.base = PRO if (key and self.key_type == "pro") else PUBLIC
         self.headers: Dict[str, str] = {}

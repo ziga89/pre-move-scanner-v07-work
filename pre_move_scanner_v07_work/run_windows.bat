@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-title Pre-Move Scanner v0.7
+title Pre-Move Scanner v0.7.4
 
 rem  Usage:
 rem    run_windows.bat                 start the live scanner  (http://127.0.0.1:8000)
@@ -46,7 +46,7 @@ if /I "%~1"=="import" goto :import
 if /I "%~1"=="test" goto :test
 
 echo.
-echo Starting Pre-Move Scanner v0.7 - live mode
+echo Starting Pre-Move Scanner v0.7.4 - live mode
 echo Open http://127.0.0.1:8000   - phones on the same Wi-Fi: http://YOUR-PC-IP:8000
 echo The first ~30 minutes are a warm-up while baselines are built.
 echo.
