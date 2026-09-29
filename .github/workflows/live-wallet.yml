@@ -1,0 +1,46 @@
+name: v0.8 live wallet providers (real APIs)
+
+# Live checks of CoinGecko metadata discovery and every wallet provider (Bitcoin / XRPL / TRON /
+# Solana / Hedera / Cardano, and Etherscan when an ETHERSCAN_API_KEY secret exists) from
+# GitHub-hosted runners. Not part of the required CI: results depend on the public APIs and on
+# each provider's availability / rate limits from the runner's region.
+
+on:
+  push:
+    branches: [claude/upbeat-mayer-jkt236]
+    paths:
+      - "pre_move_scanner_v07_work/server/intel/**"
+      - "pre_move_scanner_v07_work/tools/wallet_check.py"
+      - ".github/workflows/live-wallet.yml"
+  workflow_dispatch:
+
+jobs:
+  wallet:
+    name: live wallet check / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+        working-directory: pre_move_scanner_v07_work
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+      - name: Live wallet check (discovery + providers)
+        env:
+          ETHERSCAN_API_KEY: ${{ secrets.ETHERSCAN_API_KEY }}
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: python tools/wallet_check.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: wallet-check-${{ matrix.os }}
+          path: pre_move_scanner_v07_work/data/wallet_check_report.*

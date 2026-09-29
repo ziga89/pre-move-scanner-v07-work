@@ -13,8 +13,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from ..util import ramp
-from .classify import ACC, DIST, SHIFT, UNKNOWN
-from .labels import CEX_TYPES, HOLDER_TYPES
+from .classify import ACCUMULATION, CEX_IN, CEX_OUT, DISTRIBUTION, ROUTING_TYPES, UNKNOWN_TRANSFER
+from .labels import CEX_TYPES, MM_TYPES
+
+UNATTRIBUTED = {CEX_IN, CEX_OUT, UNKNOWN_TRANSFER}
 
 WINDOWS = {"1h": 3600, "6h": 6 * 3600, "24h": 86400}
 
@@ -27,22 +29,33 @@ def flow_windows(transfers: List[Dict[str, Any]], now: float) -> Dict[str, Dict[
     out = {}
     for name, secs in WINDOWS.items():
         w = [t for t in transfers if now - t["ts"] <= secs]
-        # Reserve flows exclude SHIFTs; transfers to/from UNLABELLED addresses are
-        # real reserve changes but unattributed, so they count at half weight.
+        # Reserve flows exclude routing (internal exchange moves, MM routing, custody shifts,
+        # bridges); transfers to/from UNLABELLED addresses are real reserve changes but
+        # unattributed, so they count at half weight.
         def wt(t):
-            return 0.5 if t["classification"] == UNKNOWN else 1.0
-        cex_in = sum(_usd(t) * wt(t) for t in w if t.get("to_type") in CEX_TYPES and t["classification"] != SHIFT)
-        cex_out = sum(_usd(t) * wt(t) for t in w if t.get("from_type") in CEX_TYPES and t["classification"] != SHIFT)
+            return 0.5 if t["classification"] in UNATTRIBUTED else 1.0
+        cex_in = sum(_usd(t) * wt(t) for t in w if t.get("to_type") in CEX_TYPES and t["classification"] not in ROUTING_TYPES)
+        cex_out = sum(_usd(t) * wt(t) for t in w if t.get("from_type") in CEX_TYPES and t["classification"] not in ROUTING_TYPES)
         out[name] = {
-            "accumulation_usd": sum(_usd(t) for t in w if t["classification"] == ACC),
-            "distribution_usd": sum(_usd(t) for t in w if t["classification"] == DIST),
-            "shift_usd": sum(_usd(t) for t in w if t["classification"] == SHIFT),
-            "unknown_usd": sum(_usd(t) for t in w if t["classification"] == UNKNOWN),
+            "accumulation_usd": sum(_usd(t) for t in w if t["classification"] == ACCUMULATION),
+            "distribution_usd": sum(_usd(t) for t in w if t["classification"] == DISTRIBUTION),
+            "shift_usd": sum(_usd(t) for t in w if t["classification"] in ROUTING_TYPES),
+            "unknown_usd": sum(_usd(t) for t in w if t["classification"] in UNATTRIBUTED),
             "cex_inflow_usd": cex_in, "cex_outflow_usd": cex_out, "net_cex_outflow_usd": cex_out - cex_in,
-            "mm_in_usd": sum(_usd(t) for t in w if t.get("to_type") == "MM"),
-            "mm_out_usd": sum(_usd(t) for t in w if t.get("from_type") == "MM"),
+            "mm_in_usd": sum(_usd(t) for t in w if t.get("to_type") in MM_TYPES),
+            "mm_out_usd": sum(_usd(t) for t in w if t.get("from_type") in MM_TYPES),
             "transfers": len(w),
+            "by_event": _by_event(w),
         }
+    return out
+
+
+def _by_event(w: List[Dict[str, Any]]) -> Dict[str, Dict[str, float]]:
+    out: Dict[str, Dict[str, float]] = {}
+    for t in w:
+        e = out.setdefault(t["classification"], {"n": 0, "usd": 0.0})
+        e["n"] += 1
+        e["usd"] += _usd(t)
     return out
 
 
@@ -56,7 +69,7 @@ def whale_candidates(tx: List[Dict[str, Any]], min_usd: float, limit: int = 10) 
     out = []
     for t in tx:
         usd = _usd(t)
-        if usd < min_usd or t.get("classification") != UNKNOWN:
+        if usd < min_usd or t.get("classification") not in (CEX_OUT, CEX_IN):
             continue
         if t.get("from_type") in CEX_TYPES and not t.get("to_type"):
             out.append({"address": t.get("to_addr"), "side": "received from exchange",
@@ -97,8 +110,8 @@ def compute_scores(asset: str, transfers: List[Dict[str, Any]], coverage: Dict[s
     res["cex_flow_direction"] = "OUTFLOW" if net_out > 0 and res["cex_flow"] > 0 else "INFLOW" if net_out < 0 and res["cex_flow"] > 0 else "NEUTRAL"
     # Share of exchange outflow that reached LABELLED holders; the rest (unlabelled recipients)
     # may be the exchange's own wallets and must never be read as buying.
-    out_all = sum(_usd(t) for t in tx if t.get("from_type") in CEX_TYPES and t["classification"] != SHIFT)
-    out_attr = sum(_usd(t) for t in tx if t.get("from_type") in CEX_TYPES and t["classification"] == ACC)
+    out_all = sum(_usd(t) for t in tx if t.get("from_type") in CEX_TYPES and t["classification"] not in ROUTING_TYPES)
+    out_attr = sum(_usd(t) for t in tx if t.get("from_type") in CEX_TYPES and t["classification"] == ACCUMULATION)
     res["cex_outflow_attributed_share"] = round(out_attr / out_all, 3) if out_all > 0 else None
     res["whale_candidates"] = whale_candidates(tx, whale_candidate_usd)
     if res["cex_flow"] >= 30:
@@ -115,10 +128,10 @@ def compute_scores(asset: str, transfers: List[Dict[str, Any]], coverage: Dict[s
         if gross / vol >= 0.005:
             res["reasons"].append(f"MM routing/rebalancing: ${gross:,.0f} gross, net ${net:+,.0f} (not directional)")
     elif net > 0:
-        cex_src = sum(_usd(t) for t in tx if t.get("to_type") == "MM" and t.get("from_type") in CEX_TYPES)
+        cex_src = sum(_usd(t) for t in tx if t.get("to_type") in MM_TYPES and t.get("from_type") in CEX_TYPES)
         res["mm_direction"] = "OFF_EXCHANGE" if cex_src >= 0.5 * mm_in else "INVENTORY_UP"
     elif net < 0:
-        cex_dst = sum(_usd(t) for t in tx if t.get("from_type") == "MM" and t.get("to_type") in CEX_TYPES)
+        cex_dst = sum(_usd(t) for t in tx if t.get("from_type") in MM_TYPES and t.get("to_type") in CEX_TYPES)
         res["mm_direction"] = "TO_EXCHANGE" if cex_dst >= 0.5 * mm_out else "INVENTORY_DOWN"
     else:
         res["mm_direction"] = "NEUTRAL"
@@ -127,8 +140,8 @@ def compute_scores(asset: str, transfers: List[Dict[str, Any]], coverage: Dict[s
 
     # --- Whales: accumulation-side vs distribution-side, with distinct wallet counts
     acc, dist = w["accumulation_usd"], w["distribution_usd"]
-    acc_w = {t["to_addr"] for t in tx if t["classification"] == ACC}
-    dist_w = {t["from_addr"] for t in tx if t["classification"] == DIST}
+    acc_w = {t["to_addr"] for t in tx if t["classification"] == ACCUMULATION}
+    dist_w = {t["from_addr"] for t in tx if t["classification"] == DISTRIBUTION}
     mixed = (min(acc, dist) / max(acc, dist)) if max(acc, dist) > 0 else 0.0
     wnet = acc - dist
     res["whale"] = round(100 * ramp(abs(wnet) / vol, 0.002, 0.03) * (1 - 0.7 * mixed) * damp, 1)
@@ -146,7 +159,7 @@ def compute_scores(asset: str, transfers: List[Dict[str, Any]], coverage: Dict[s
         res["whale_direction"] = "NEUTRAL"
 
     # --- Scarcity: REAL supply drain vs reshuffling
-    returned = sum(_usd(t) for t in tx if t["classification"] == DIST and t["from_addr"] in acc_w)
+    returned = sum(_usd(t) for t in tx if t["classification"] == DISTRIBUTION and t["from_addr"] in acc_w)
     drain = (res["cex_flow_direction"] == "OUTFLOW" and res["cex_flow"] >= 30 and res["whale_direction"] == "ACCUMULATION"
              and res["whale"] >= 30 and returned < 0.2 * max(acc, 1.0))
     total_moves = acc + dist + w["shift_usd"]

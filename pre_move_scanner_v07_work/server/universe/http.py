@@ -13,6 +13,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 
+from .. import __version__
+
 
 class HttpError(Exception):
     def __init__(self, status: int, message: str = "", retry_after: Optional[float] = None):
@@ -30,7 +32,7 @@ def _retry_after(headers) -> Optional[float]:
 
 
 class HttpClient:
-    def __init__(self, timeout: float = 20.0, user_agent: str = "pre-move-scanner/0.7"):
+    def __init__(self, timeout: float = 20.0, user_agent: str = f"pre-move-scanner/{__version__}"):
         self.timeout = timeout
         self.headers = {"accept": "application/json", "user-agent": user_agent}
         self._httpx = None
@@ -47,19 +49,37 @@ class HttpClient:
             if r.status_code >= 400:
                 raise HttpError(r.status_code, r.text, _retry_after(r.headers))
             return r.json()
-        return await asyncio.to_thread(self._get_sync, url, params, headers)
+        return await asyncio.to_thread(self._send_sync, url, params, headers, None)
 
-    def _get_sync(self, url, params, headers):
+    async def post_json(self, url: str, body: Any, headers: Optional[Dict[str, str]] = None) -> Any:
+        """POST a JSON body (JSON-RPC endpoints, Koios) and decode the JSON answer."""
+        if self._httpx is not None:
+            r = await self._httpx.post(url, json=body, headers=headers)
+            if r.status_code >= 400:
+                raise HttpError(r.status_code, r.text, _retry_after(r.headers))
+            return r.json()
+        return await asyncio.to_thread(self._send_sync, url, None, headers, body)
+
+    def _send_sync(self, url, params, headers, body):
         if params:
             url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={**self.headers, **(headers or {})})
+        hdrs = {**self.headers, **(headers or {})}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            hdrs["content-type"] = "application/json"
+        req = urllib.request.Request(url, data=data, headers=hdrs, method="POST" if body is not None else "GET")
         ctx = ssl.create_default_context()
         try:
             with urllib.request.urlopen(req, timeout=self.timeout, context=ctx) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace") if hasattr(exc, "read") else ""
-            raise HttpError(exc.code, body, _retry_after(exc.headers)) from None
+            text = exc.read().decode("utf-8", "replace") if hasattr(exc, "read") else ""
+            raise HttpError(exc.code, text, _retry_after(exc.headers)) from None
+
+    # kept for callers / tests written against v0.7
+    def _get_sync(self, url, params, headers):
+        return self._send_sync(url, params, headers, None)
 
     async def close(self) -> None:
         if self._httpx is not None:
