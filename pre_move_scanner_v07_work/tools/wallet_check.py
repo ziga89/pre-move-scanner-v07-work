@@ -29,7 +29,7 @@ from server import __version__  # noqa: E402
 from server.config import load_config  # noqa: E402
 from server.intel.addr import tron_hex_to_base58  # noqa: E402
 from server.intel.model import TrackedAsset  # noqa: E402
-from server.intel.providers import build_providers  # noqa: E402
+from server.intel.providers import ProviderRateLimited, build_providers  # noqa: E402
 from server.intel.registry import READY, decide  # noqa: E402
 from server.universe.coingecko import CoinGeckoClient  # noqa: E402
 from server.universe.http import HttpClient  # noqa: E402
@@ -51,7 +51,8 @@ SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
 def rec(step: str, status: str, detail: str, data: Any = None) -> None:
     RESULTS.append({"step": step, "status": status, "detail": detail, "data": data})
-    print(f"[{status}] {step}: {detail}", flush=True)
+    text = f"[{status}] {step}: {detail}".replace("\u2192", "->").replace("\u2026", "...").replace("\u00b7", "-")
+    print(text.encode("ascii", "replace").decode("ascii"), flush=True)   # Windows consoles: plain ASCII
 
 
 def summarize_transfers(res) -> str:
@@ -63,15 +64,26 @@ def summarize_transfers(res) -> str:
             f"{x.from_address[:12]}… → {x.to_address[:12]}… tx {x.tx_hash[:16]}…")
 
 
+async def patient(p, fn, *args):
+    """One retry after a rate-limit back-off (public endpoints answer 'too busy' now and then)."""
+    try:
+        return await fn(*args)
+    except ProviderRateLimited:
+        wait = max(1.0, float(p.budget.backoff_until - time.time()) + 1.0)
+        rec(f"{p.name} rate limit", "WARN", f"rate-limited by the public endpoint; retrying once after {wait:.0f}s")
+        await asyncio.sleep(min(wait, 120.0))
+        return await fn(*args)
+
+
 async def poll_twice(p, chain: str, address: str, assets: List[TrackedAsset], step: str) -> None:
-    r1 = await p.fetch_address(chain, address, assets, {})
+    r1 = await patient(p, p.fetch_address, chain, address, assets, {})
     status = "PASS" if r1.transfers else "WARN"
     rec(step + " · first poll", status, f"{address}: {summarize_transfers(r1)}; cursor {json.dumps(r1.cursor)[:120]}")
-    r2 = await p.fetch_address(chain, address, assets, r1.cursor)
+    r2 = await patient(p, p.fetch_address, chain, address, assets, r1.cursor)
     dup = {(x.tx_hash, x.index) for x in r1.transfers} & {(x.tx_hash, x.index) for x in r2.transfers}
     rec(step + " · second poll (cursor)", "PASS",
         f"{len(r2.transfers)} new transfers ({len(dup)} already seen - de-duplicated by the monitor), complete={r2.complete}")
-    bal = await p.fetch_balance(chain, address, assets[0])
+    bal = await patient(p, p.fetch_balance, chain, address, assets[0])
     rec(step + " · balance", "PASS" if bal is not None else "WARN", f"{bal} {assets[0].asset}")
 
 
@@ -87,9 +99,14 @@ async def check_discovery(cg, providers) -> Dict[str, Dict[str, Any]]:
             d = await cg.coin_detail(cid)
             r = decide(sym, cid, d, providers, time.time())
             desc = f"{r['state']} · chain {r['native_chain']} · native {bool(r['native_asset'])} · contract {r['contract_address']} · provider {r['wallet_provider']} · {r['reason']}"
-            ok = (expect == "unsupported" and r["state"] == "UNSUPPORTED") or (
-                r["state"] == READY and expect.split()[1] == r["native_chain"]
-                and (expect.startswith("native") == bool(r["native_asset"])))
+            kind, where = expect.split()[0], expect.split()[-1]
+            if expect == "unsupported":
+                ok = r["state"] == "UNSUPPORTED"
+            elif kind == "native":
+                ok = r["state"] == READY and bool(r["native_asset"]) and r["native_chain"] == where
+            else:                                    # "<chain> token"
+                ok = r["state"] == READY and not r["native_asset"] and r["native_chain"] == kind \
+                    and bool(r["contract_address"])
             rec(f"discovery {sym} ({cid})", "PASS" if ok else "FAIL", desc + ("" if ok else f" (expected {expect})"))
             out[sym] = r
         except Exception as exc:
@@ -181,8 +198,7 @@ async def check_solana(p) -> None:
     for s in sigs:
         if s.get("err") is not None:
             continue
-        tx = await p.rpc("getTransaction", [s["signature"], {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0,
-                                                               "commitment": "finalized"}])
+        tx = await p.get_transaction(s["signature"])
         if not tx:
             continue
         meta = tx.get("meta") or {}
@@ -212,9 +228,9 @@ async def check_hedera(p) -> None:
                                                         "result": "success"}) or {}
     acct = None
     for t in d.get("transactions") or []:
-        skip = {"0.0.98", "0.0.800", "0.0.801", str(t.get("node"))}
         for x in t.get("transfers") or []:
-            if str(x.get("account")) not in skip and int(x.get("amount") or 0) > 0:
+            num = int(str(x.get("account") or "0.0.0").split(".")[-1])
+            if num > 1000 and int(x.get("amount") or 0) > 0:          # skip system / node / fee accounts
                 acct = str(x["account"])
                 break
         if acct:
@@ -315,11 +331,11 @@ async def main() -> int:
     await http.close()
     out = ROOT / a.out
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.with_suffix(".json").write_text(json.dumps(RESULTS, indent=2, default=str))
+    out.with_suffix(".json").write_text(json.dumps(RESULTS, indent=2, default=str), encoding="utf-8")
     lines = [f"# Wallet check - Pre-Move Scanner {__version__}", "", f"Run: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
              "", "| Status | Step | Detail |", "|---|---|---|"]
     lines += [f"| {r['status']} | {r['step']} | {str(r['detail']).replace('|', '/')} |" for r in RESULTS]
-    out.with_suffix(".md").write_text("\n".join(lines) + "\n")
+    out.with_suffix(".md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     fails = [r for r in RESULTS if r["status"] == "FAIL"]
     print(f"\n{len(RESULTS)} checks, {len(fails)} FAIL, {sum(1 for r in RESULTS if r['status'] == 'WARN')} WARN")
     return 1 if fails else 0

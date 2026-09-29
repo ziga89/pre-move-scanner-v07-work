@@ -15,6 +15,7 @@ contains a key (Helius, QuickNode, ...) can be supplied through the environment 
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from ...env import env_secret
@@ -42,6 +43,9 @@ class SolanaProvider(WalletProvider):
         self.rpc_url = private or str(self.cfg.get("rpc_url") or DEFAULT_RPC)
         self.max_tx = int(self.cfg.get("max_tx_per_poll", 25))
         self.seed = int(self.cfg.get("seed_signatures", 10))
+        # newest transaction version the node may return (Solana introduced v1 transactions); raised
+        # automatically when the node asks for a higher one
+        self.max_tx_version = int(self.cfg.get("max_supported_transaction_version", 1))
         self._id = 0
 
     def normalize_address(self, chain: str, address: str) -> Optional[str]:
@@ -97,11 +101,22 @@ class SolanaProvider(WalletProvider):
                     out.complete = False
                 budget_left -= len(take)
                 for s in reversed(take):           # oldest first
-                    tx = await self.rpc("getTransaction", [s["signature"], {
-                        "encoding": "jsonParsed", "maxSupportedTransactionVersion": 0, "commitment": "finalized"}])
+                    tx = await self.get_transaction(s["signature"])
                     if tx:
                         out.transfers.extend(self.normalize_tx(s["signature"], tx, address, a))
         return out
+
+    async def get_transaction(self, sig: str) -> Optional[Dict[str, Any]]:
+        opts = {"encoding": "jsonParsed", "commitment": "finalized"}
+        try:
+            return await self.rpc("getTransaction", [sig, dict(opts, maxSupportedTransactionVersion=self.max_tx_version)])
+        except ProviderError as exc:
+            m = re.search(r'maxSupportedTransactionVersion"?\s*:\s*(\d+)', str(exc))
+            if not m or int(m.group(1)) <= self.max_tx_version:
+                raise
+            self.max_tx_version = int(m.group(1))
+            self.budget.consecutive_failures = 0
+            return await self.rpc("getTransaction", [sig, dict(opts, maxSupportedTransactionVersion=self.max_tx_version)])
 
     def normalize_tx(self, sig: str, tx: Dict[str, Any], owner: str, asset: TrackedAsset) -> List[RawTransfer]:
         meta = tx.get("meta") or {}

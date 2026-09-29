@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from .schema import MIGRATIONS, RETENTION
+from .schema import LATEST_VERSION, MIGRATIONS, RETENTION
 
 
 def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
@@ -32,18 +32,67 @@ def connect(path: Path, readonly: bool = False) -> sqlite3.Connection:
 
 
 def migrate(con: sqlite3.Connection) -> List[int]:
+    """Apply pending migrations in place (forward-only, additive, idempotent). Never recreates a table."""
     con.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, "
                 "applied_ts REAL, description TEXT)")
     done = {r[0] for r in con.execute("SELECT version FROM schema_migrations")}
     applied = []
-    for version, desc, sql in MIGRATIONS:
+    for version, desc, step in MIGRATIONS:
         if version in done:
             continue
-        con.executescript(sql)
-        con.execute("INSERT INTO schema_migrations VALUES (?,?,?)", (version, time.time(), desc))
-        con.commit()
+        if callable(step):
+            con.commit()
+            con.execute("BEGIN")
+            try:
+                step(con)
+                con.execute("INSERT INTO schema_migrations VALUES (?,?,?)", (version, time.time(), desc))
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+        else:
+            con.executescript(step)
+            con.execute("INSERT INTO schema_migrations VALUES (?,?,?)", (version, time.time(), desc))
+            con.commit()
         applied.append(version)
     return applied
+
+
+def schema_version(path: Path) -> Optional[int]:
+    """Highest applied migration of an existing database file (None: no file / not a scanner DB yet)."""
+    if not Path(path).exists() or Path(path).stat().st_size == 0:
+        return None
+    con = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True, timeout=10.0)
+    try:
+        return con.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        con.close()
+
+
+def backup_before_migration(path: Path, label: str, min_free_factor: float = 2.0) -> Dict[str, Any]:
+    """Consistent copy (SQLite online backup, WAL-safe) of an existing database before migrating it.
+
+    Skipped - and reported - when free disk space is below `min_free_factor` x the database size."""
+    import shutil
+    path = Path(path)
+    size = path.stat().st_size + sum(p.stat().st_size for p in (Path(str(path) + "-wal"),) if p.exists())
+    dest_dir = path.parent / "backups"
+    free = shutil.disk_usage(path.parent).free
+    if free < min_free_factor * size + 50e6:
+        return {"backup": None, "skipped": f"not enough free disk space ({free / 1e9:.1f} GB free, "
+                                          f"database {size / 1e9:.2f} GB)"}
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{path.stem}.before-{label}-{time.strftime('%Y%m%d-%H%M%S')}{path.suffix}"
+    src = sqlite3.connect(str(path), timeout=30.0)
+    dst = sqlite3.connect(str(dest))
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+    return {"backup": str(dest), "bytes": dest.stat().st_size}
 
 
 class Writer(threading.Thread):
@@ -135,10 +184,19 @@ class Writer(threading.Thread):
 
 
 class Database:
-    def __init__(self, path: Path, scfg: Optional[Dict[str, Any]] = None):
+    def __init__(self, path: Path, scfg: Optional[Dict[str, Any]] = None, backup_label: Optional[str] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.cfg = scfg or {}
+        existing = schema_version(self.path)
+        self.new_install = existing is None
+        self.upgraded_from = existing
+        self.backup: Dict[str, Any] = {}
+        if existing is not None and existing < LATEST_VERSION and self.cfg.get("backup_before_migration", True):
+            try:
+                self.backup = backup_before_migration(self.path, backup_label or f"schema{LATEST_VERSION}")
+            except Exception as exc:          # a failed backup must never block the scanner; it is reported
+                self.backup = {"backup": None, "error": repr(exc)[:200]}
         con = connect(self.path)
         self.applied = migrate(con)
         con.close()
@@ -186,7 +244,9 @@ class Database:
         w = self.writer
         return {"path": str(self.path), "queue": w.q.qsize(), "dropped_rows": w.dropped,
                 "written_rows": w.written_rows, "batches": w.batches, "errors": w.errors,
-                "last_error": w.last_error, "migrations_applied_now": self.applied}
+                "last_error": w.last_error, "migrations_applied_now": self.applied,
+                "new_install": self.new_install, "upgraded_from_schema": self.upgraded_from,
+                "schema_version": LATEST_VERSION, "pre_migration_backup": self.backup}
 
     def close(self) -> None:
         self.writer.stop()

@@ -5,7 +5,8 @@ v0.6 history import; the v0.6 database file itself is never written.
 """
 from __future__ import annotations
 
-from typing import List, Tuple
+import sqlite3
+from typing import Callable, List, Tuple, Union
 
 from ..engine.baselines import MINUTE_RAW
 
@@ -61,7 +62,47 @@ def _cols(cols: List[str], pk: List[str], text: Tuple[str, ...] = ()) -> str:
     return ", ".join(parts)
 
 
-MIGRATIONS: List[Tuple[int, str, str]] = [
+def _columns(con: sqlite3.Connection, table: str) -> set:
+    return {r[1] for r in con.execute(f"PRAGMA table_info({table})")}
+
+
+def migration_3(con: sqlite3.Connection) -> None:
+    """v0.8: asset registry, manual assets, app metadata, normalised wallet-event columns.
+
+    Additive only and idempotent (every statement checks what already exists), so an interrupted
+    upgrade can simply run again. The v0.7.3 `token_contracts` cache is copied (verified-supported
+    rows only) into the registry; the old table is kept untouched for a downgrade."""
+    for stmt in (
+        "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT, updated_ts REAL)",
+        "CREATE TABLE IF NOT EXISTS manual_assets (symbol TEXT PRIMARY KEY, coingecko_id TEXT, name TEXT, "
+        "added_ts REAL, removed_ts REAL, source TEXT, note TEXT)",
+        "CREATE TABLE IF NOT EXISTS asset_registry (symbol TEXT PRIMARY KEY, name TEXT, coingecko_id TEXT, "
+        "market_cap_rank INTEGER, manual INTEGER DEFAULT 0, native_chain TEXT, token_platform TEXT, "
+        "contract_address TEXT, native_asset INTEGER DEFAULT 0, wallet_provider TEXT, wallet_supported INTEGER DEFAULT 0, "
+        "discovery_confidence TEXT, verified INTEGER DEFAULT 0, last_metadata_check REAL, created_at REAL, "
+        "updated_at REAL, state TEXT, reason TEXT, decimals INTEGER, platforms TEXT, override TEXT, source TEXT)",
+        "CREATE INDEX IF NOT EXISTS idx_registry_cgid ON asset_registry(coingecko_id)",
+    ):
+        con.execute(stmt)       # one transaction (no executescript: it would commit implicitly)
+    have = _columns(con, "onchain_transfers")
+    for col in ("event_type", "attribution_confidence", "entity_type", "direction", "provider"):
+        if col not in have:
+            con.execute(f"ALTER TABLE onchain_transfers ADD COLUMN {col} TEXT")
+    if "token_contracts" in {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        from ..intel.chains import CHAINS
+        for r in con.execute("SELECT asset, coingecko_id, chain, contract, decimals, checked_ts FROM token_contracts "
+                             "WHERE state='supported' AND contract IS NOT NULL").fetchall():
+            c = CHAINS.get(r[2] or "")
+            con.execute(
+                "INSERT OR IGNORE INTO asset_registry (symbol, coingecko_id, native_chain, token_platform, "
+                "contract_address, native_asset, wallet_provider, wallet_supported, discovery_confidence, verified, "
+                "last_metadata_check, created_at, updated_at, state, reason, decimals, source) "
+                "VALUES (?,?,?,?,?,0,'etherscan',1,'high',0,?,?,?,'READY',?,?,'coingecko')",
+                (r[0], r[1], r[2], c.cg_platform if c else None, r[3], r[5], r[5], r[5],
+                 "migrated from the v0.7.3 contract cache; on-chain symbol check pending", r[4]))
+
+
+MIGRATIONS: List[Tuple[int, str, Union[str, Callable[[sqlite3.Connection], None]]]] = [
     (1, "v0.7 initial schema", f"""
 CREATE TABLE IF NOT EXISTS asset_metrics_5s ({_cols(ASSET_5S_COLS, ['asset', 'ts'])},
   PRIMARY KEY (asset, ts)) WITHOUT ROWID;
@@ -161,7 +202,9 @@ CREATE TABLE IF NOT EXISTS token_contracts (
   asset TEXT PRIMARY KEY, coingecko_id TEXT, state TEXT NOT NULL, chain TEXT, contract TEXT,
   decimals INTEGER, reason TEXT, source TEXT, checked_ts REAL);
 """),
+    (3, "v0.8 asset registry, manual assets, app metadata, wallet event columns", migration_3),
 ]
+LATEST_VERSION = MIGRATIONS[-1][0]
 
 ALERT_COLS = ["id", "asset", "state", "started_ts", "fired_ts", "updated_ts", "ended_ts", "duration_s",
               "evidence_score", "peak_evidence", "premove", "peak_premove", "price_at_fire", "price_at_end",
@@ -170,6 +213,7 @@ ALERT_COLS = ["id", "asset", "state", "started_ts", "fired_ts", "updated_ts", "e
 ALERT_JSON_COLS = ("confirmed_venues", "reasons", "checks")
 TOKEN_CONTRACT_COLS = ["asset", "coingecko_id", "state", "chain", "contract", "decimals", "reason", "source",
                        "checked_ts"]
+MANUAL_ASSET_COLS = ["symbol", "coingecko_id", "name", "added_ts", "removed_ts", "source", "note"]
 
 RETENTION = [
     # (table, config key, unit seconds[, time column - default "ts"])

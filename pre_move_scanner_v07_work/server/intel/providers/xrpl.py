@@ -54,7 +54,8 @@ class XrplProvider(WalletProvider):
         if res.get("status") == "error" or res.get("error"):
             err = str(res.get("error") or "error")
             if err in ("slowDown", "tooBusy"):
-                self.budget.rate_limited(None, f"XRPL {err}")
+                self._url += 1                    # public servers: fail over to the next one
+                self.budget.rate_limited(5.0, f"XRPL {err} from {url}")
                 raise ProviderRateLimited(f"{self.label}: {err}")
             if err == "actNotFound":
                 return {"not_found": True}
