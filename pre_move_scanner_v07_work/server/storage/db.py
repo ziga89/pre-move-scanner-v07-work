@@ -71,6 +71,30 @@ def schema_version(path: Path) -> Optional[int]:
         con.close()
 
 
+def record_app_version(con: sqlite3.Connection, version: str, schema_from: Optional[int],
+                       applied: List[int], now: Optional[float] = None) -> Optional[str]:
+    """Keep `app_meta` current: the running app version, the version installed first, and one
+    `upgrade_history` entry per version change or schema migration. Returns the previous app version
+    (None on a new database or one last opened by v0.7, which did not record it)."""
+    now = time.time() if now is None else now
+    rows = dict(con.execute("SELECT key, value FROM app_meta").fetchall())
+    prev = rows.get("app_version")
+    history = json.loads(rows.get("upgrade_history") or "[]")
+    if prev != version or applied:
+        history.append({"ts": now, "from_version": prev, "to_version": version,
+                        "from_schema": schema_from, "migrations": applied})
+    upd = {"app_version": version, "upgrade_history": json.dumps(history[-50:])}
+    if "installed_version" not in rows:
+        upd["installed_version"] = version if schema_from is None else f"before {version} (schema {schema_from})"
+        upd["installed_ts"] = str(now)
+    if prev is not None and prev != version:
+        upd["previous_app_version"] = prev
+    con.executemany("INSERT OR REPLACE INTO app_meta (key, value, updated_ts) VALUES (?,?,?)",
+                    [(k, v, now) for k, v in upd.items()])
+    con.commit()
+    return prev
+
+
 def backup_before_migration(path: Path, label: str, min_free_factor: float = 2.0) -> Dict[str, Any]:
     """Consistent copy (SQLite online backup, WAL-safe) of an existing database before migrating it.
 
@@ -184,7 +208,8 @@ class Writer(threading.Thread):
 
 
 class Database:
-    def __init__(self, path: Path, scfg: Optional[Dict[str, Any]] = None, backup_label: Optional[str] = None):
+    def __init__(self, path: Path, scfg: Optional[Dict[str, Any]] = None, backup_label: Optional[str] = None,
+                 app_version: Optional[str] = None):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.cfg = scfg or {}
@@ -199,6 +224,7 @@ class Database:
                 self.backup = {"backup": None, "error": repr(exc)[:200]}
         con = connect(self.path)
         self.applied = migrate(con)
+        self.previous_app_version = record_app_version(con, app_version, existing, self.applied) if app_version else None
         con.close()
         self._local = threading.local()
         self._readers: List[sqlite3.Connection] = []   # every thread-local reader, so close() can close them all
@@ -246,6 +272,7 @@ class Database:
                 "written_rows": w.written_rows, "batches": w.batches, "errors": w.errors,
                 "last_error": w.last_error, "migrations_applied_now": self.applied,
                 "new_install": self.new_install, "upgraded_from_schema": self.upgraded_from,
+                "previous_app_version": self.previous_app_version,
                 "schema_version": LATEST_VERSION, "pre_migration_backup": self.backup}
 
     def close(self) -> None:

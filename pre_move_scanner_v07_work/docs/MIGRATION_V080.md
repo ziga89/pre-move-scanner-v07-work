@@ -30,6 +30,7 @@ anything, you do not copy data, and nothing you collected is lost.
 | `config.json` | **Never rewritten.** v0.7 keys keep working (see below). |
 | `.venv\` | Reused. `pip install -r requirements.txt` runs on every start, as before. |
 | `server\intel\providers.py` (v0.7 file) | Replaced by the package `server\intel\providers\`. If you unzip over the old folder, the stale `providers.py` stays behind but is ignored: Python loads the package first. You may delete it. |
+| `server\intel\discovery.py` (v0.7 file) | Replaced by the asset registry (`server\intel\registry.py`). A stale copy left behind by unzipping is never imported. You may delete it. |
 
 What is **kept** by the migration (tested in `tests/test_upgrade_v08.py` with a real v0.7.3-shaped
 database, row by row):

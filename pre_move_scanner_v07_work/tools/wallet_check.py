@@ -64,15 +64,19 @@ def summarize_transfers(res) -> str:
             f"{x.from_address[:12]}… → {x.to_address[:12]}… tx {x.tx_hash[:16]}…")
 
 
-async def patient(p, fn, *args):
-    """One retry after a rate-limit back-off (public endpoints answer 'too busy' now and then)."""
-    try:
-        return await fn(*args)
-    except ProviderRateLimited:
-        wait = max(1.0, float(p.budget.backoff_until - time.time()) + 1.0)
-        rec(f"{p.name} rate limit", "WARN", f"rate-limited by the public endpoint; retrying once after {wait:.0f}s")
-        await asyncio.sleep(min(wait, 120.0))
-        return await fn(*args)
+async def patient(p, fn, *args, retries: int = 2):
+    """Retry after the provider's rate-limit back-off (public endpoints answer 'too busy' now and then;
+    GitHub runners share their IP addresses with other users). The second wait is longer."""
+    for attempt in range(retries + 1):
+        try:
+            return await fn(*args)
+        except ProviderRateLimited:
+            if attempt == retries:
+                raise
+            wait = max(1.0, float(p.budget.backoff_until - time.time()) + 1.0) + 20.0 * attempt
+            rec(f"{p.name} rate limit", "WARN", f"rate-limited by the public endpoint; retry {attempt + 1}/{retries} "
+                f"after {wait:.0f}s")
+            await asyncio.sleep(min(wait, 120.0))
 
 
 async def poll_twice(p, chain: str, address: str, assets: List[TrackedAsset], step: str) -> None:
@@ -322,6 +326,12 @@ async def main() -> int:
                 await check_evm(by_family["evm"], found)
             else:
                 await fn(by_family[name])
+        except ProviderRateLimited as exc:
+            # the endpoint kept refusing: the provider behaved as designed (backed off), but the check itself
+            # could not complete - reported as not verified, never as a pass
+            rec(f"{name}", "WARN", f"NOT VERIFIED in this run - the public endpoint kept rate-limiting after "
+                f"retries ({str(exc)[:160]}); the provider backed off as designed. Re-run later, or set a "
+                "private endpoint / API key for this chain.")
         except Exception as exc:
             rec(f"{name}", "FAIL", f"{type(exc).__name__}: {exc}", traceback.format_exc()[-1500:])
     for p in providers.providers:

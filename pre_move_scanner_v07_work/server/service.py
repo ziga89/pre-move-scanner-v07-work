@@ -100,7 +100,8 @@ class ScannerService:
         self.sim = cfg.get("mode") == "sim" or cfg["feeds"].get("backend") == "sim"
         if self.sim:
             cfg["universe"] = dict(cfg["universe"], manual_assets=[], pinned_assets=[])  # no real tickers in SIM
-        self.db = Database(resolve_path(cfg, cfg["storage"]["path"]), cfg["storage"], backup_label=f"v{__version__}")
+        self.db = Database(resolve_path(cfg, cfg["storage"]["path"]), cfg["storage"], backup_label=f"v{__version__}",
+                           app_version=__version__)
         self.fx = FxService()
         self.adapters, self.sim_driver = build_adapters(cfg, clock=clock)
         self.selector = VenueSelector(cfg["discovery"])
@@ -119,6 +120,7 @@ class ScannerService:
         self.category_ids: Dict[str, set] = {}
         self.category_ts = 0.0
         self.universe_result: Dict[str, Any] = {}
+        self.universe_live = False                      # last refresh used a live CoinGecko ranking
         self.status: Dict[str, Any] = {"started": clock(), "universe": "pending", "discovery": "pending",
                                        "last_tick_ms": None, "avg_tick_ms": None, "ticks": 0,
                                        "warnings": list(cfg.get("_meta", {}).get("warnings", []))}
@@ -388,7 +390,7 @@ class ScannerService:
 
     async def refresh_universe(self) -> None:
         now = self.clock()
-        cache = resolve_path(self.cfg, "data/universe_cache.json")
+        cache = resolve_path(self.cfg, self.cfg["universe"].get("cache_path") or "data/universe_cache.json")
         manual_rows: List[Dict[str, Any]] = []
         entries = self._manual_entries()          # SIM: only assets added through the API (no config seed)
         try:
@@ -404,7 +406,9 @@ class ScannerService:
                 cache.write_text(json.dumps({"ts": now, "rows": rows, "manual": manual_rows,
                                              "categories": {k: sorted(v) for k, v in self.category_ids.items()}}))
             src = "sim" if self.sim else "coingecko"
+            self.universe_live = True
         except Exception as exc:
+            self.universe_live = False
             if not cache.exists():
                 self.status["universe"] = f"CoinGecko unavailable ({exc!r}); no cached universe"
                 if not self.universe_result:
@@ -517,15 +521,26 @@ class ScannerService:
         return out
 
     # ------------------------------------------------------------------ loops
+    def universe_wait(self, failures: int) -> float:
+        """Seconds until the next universe refresh: the normal interval after a live ranking; after a failed
+        one (CoinGecko unreachable, cache or manual-only universe) 2, 4, 8, ... minutes, capped at it."""
+        u = self.cfg["universe"]
+        iv = float(u.get("refresh_minutes", 60)) * 60
+        if self.universe_live:
+            return iv
+        return min(iv, max(30.0, float(u.get("retry_minutes", 2)) * 60) * 2 ** min(failures, 10))
+
     async def _universe_loop(self) -> None:
-        iv = float(self.cfg["universe"].get("refresh_minutes", 60)) * 60
+        failures = 0
         while True:
-            await asyncio.sleep(iv)
+            await asyncio.sleep(self.universe_wait(failures))
             try:
                 await self.refresh_universe()
                 await self.apply_selection()
             except Exception as exc:
+                self.universe_live = False
                 self.status["universe"] = f"refresh error: {exc!r}"[:200]
+            failures = 0 if self.universe_live else failures + 1
 
     async def _discovery_loop(self) -> None:
         iv = float(self.cfg["discovery"].get("refresh_minutes", 45)) * 60

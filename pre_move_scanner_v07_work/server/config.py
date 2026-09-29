@@ -39,6 +39,9 @@ DEFAULTS: Dict[str, Any] = {
         "per_page": 250,
         "fetch_pages": 2,
         "refresh_minutes": 60,
+        # CoinGecko unreachable (no live ranking): retry after 2, 4, 8, ... minutes, capped at refresh_minutes
+        "retry_minutes": 2,
+        "cache_path": "data/universe_cache.json",
         "entry_confirmations": 2,
         "exit_rank_buffer": 15,
         # initial manual assets (seeded once into SQLite; afterwards managed on the Universe page)

@@ -227,6 +227,44 @@ class SearchResolveTest(unittest.TestCase):
         asyncio.run(go())
 
 
+class UniverseRetryTest(unittest.TestCase):
+    """CoinGecko unreachable at the first start (no cache): manual assets are monitored and the ranking is
+    retried after 2, 4, 8, ... minutes instead of waiting for the hourly refresh."""
+
+    def test_unreachable_coingecko_is_retried_sooner(self):
+        d = scratch_dir("universe_retry")
+        for p in d.glob("*"):
+            p.unlink()
+
+        class DownCG(FakeCG):
+            async def markets(self, *a, **kw):
+                raise RuntimeError("HTTP 403 from CoinGecko")
+
+        async def go():
+            svc = ScannerService(cfg(mode="sim", feeds={"backend": "sim"}, sim={"assets": 5, "seed": 5, "scenarios": False},
+                                     universe={"target_size": 3, "cache_path": str(d / "universe_cache.json")},
+                                     storage={"path": str(d / "retry.db")}))
+            try:
+                svc.sim = False
+                svc.cg = DownCG()
+                await svc.refresh_universe()
+                self.assertFalse(svc.universe_live)
+                self.assertIn("CoinGecko unavailable", svc.status["universe"])
+                self.assertFalse((d / "universe_cache.json").exists())
+                self.assertEqual([svc.universe_wait(n) for n in range(7)], [120, 240, 480, 960, 1920, 3600, 3600])
+                svc.sim = True
+                await svc.refresh_universe()                  # a live ranking restores the normal interval
+                self.assertTrue(svc.universe_live)
+                self.assertEqual(svc.universe_wait(4), 3600)
+            finally:
+                svc.sim = True
+                await svc.stop()
+        try:
+            asyncio.run(go())
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 class UniverseCompositionTest(unittest.TestCase):
     """Top-100 ∪ manual with the recorded CoinGecko / exchange fixtures."""
 

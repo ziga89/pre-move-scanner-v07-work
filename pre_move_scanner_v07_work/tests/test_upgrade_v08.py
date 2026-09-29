@@ -128,6 +128,38 @@ class UpgradeTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_app_version_and_upgrade_history_in_app_meta(self):
+        def meta(db):
+            return dict(db.read_sync(lambda c: c.execute("SELECT key, value FROM app_meta").fetchall()))
+        db = Database(self.db_path, cfg()["storage"], backup_label="v0.8.0", app_version="0.8.0")
+        try:
+            m = meta(db)
+            self.assertIsNone(db.previous_app_version)               # v0.7 did not record its version
+            self.assertEqual((m["app_version"], m["installed_version"]), ("0.8.0", "before 0.8.0 (schema 2)"))
+            h = json.loads(m["upgrade_history"])
+            self.assertEqual([(x["from_schema"], x["migrations"], x["to_version"]) for x in h], [(2, [3], "0.8.0")])
+        finally:
+            db.close()
+        db = Database(self.db_path, cfg()["storage"], app_version="0.8.0")   # same version again: no new entry
+        try:
+            self.assertEqual(len(json.loads(meta(db)["upgrade_history"])), 1)
+        finally:
+            db.close()
+        db = Database(self.db_path, cfg()["storage"], app_version="0.8.1")   # a later update is recorded
+        try:
+            m = meta(db)
+            self.assertEqual((db.previous_app_version, m["previous_app_version"], m["app_version"]),
+                             ("0.8.0", "0.8.0", "0.8.1"))
+            self.assertEqual(json.loads(m["upgrade_history"])[-1]["from_version"], "0.8.0")
+            self.assertEqual(db.stats()["previous_app_version"], "0.8.0")
+        finally:
+            db.close()
+        fresh = Database(self.d / "data" / "fresh.db", cfg()["storage"], app_version="0.8.0")
+        try:
+            self.assertEqual(meta(fresh)["installed_version"], "0.8.0")
+        finally:
+            fresh.close()
+
     def test_migration_is_idempotent_and_atomic(self):
         con = sqlite3.connect(self.db_path)
         migration_3(con)                             # applied twice by hand: no error, nothing duplicated

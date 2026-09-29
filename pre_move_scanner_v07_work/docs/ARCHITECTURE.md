@@ -1,18 +1,23 @@
-# v0.7 architecture (as implemented)
+# Architecture (v0.8.0, as implemented)
 
 ```
-CoinGecko ──► universe/        Top-N (back-fill past 100) − exclusions + pinned, hysteresis, cache fallback
+CoinGecko ──► universe/        Top-N (back-fill past 100) − exclusions + manual assets (by CoinGecko id), hysteresis, cache fallback
 Exchanges ──► universe/        catalogs (load_markets + fetch_tickers) → per-coin venue selection, FX, checks
    (ccxt)     feeds/           capability matrix → partitions → supervised book/trade loops → health
               engine/          MarketState per coin×venue (band book, rings, baselines, features)
               engine/          AssetState per coin (flags, aggregation, sub-scores, pipeline, status, events)
-Etherscan ──► intel/           provider registry → labels → address-centric monitor → classifier → MM/Whale/CEX/Scarcity
-CoinGecko ──► intel/           contract discovery (native EVM tokens only) → status: OFF/NO KEY/WARMING/UNSUPPORTED/N/A/value
+CoinGecko ──► intel/registry   asset registry: native coin / token, chain, contract, provider, overrides (SQLite)
+Chains    ──► intel/providers/ Etherscan V2 (EVM + XDC) · Esplora · rippled · TronGrid · Solana RPC · Hedera · Koios
+                               → RawTransfer → monitor (budget / priority) → labels → classifier → WalletEvent
+              intel/           scores MM / Whale / CEX flow / Scarcity → status OFF / NO KEY / DISCOVERING / WARMING /
+                               ACTIVE / UNSUPPORTED / DEGRADED / N/A
               engine/alerts.py Signal Radar: WATCH / CONFIRMING / HIGH-CONVICTION / INVALIDATED → alerts table
-              storage/         SQLite WAL, writer thread, rollups, retention, history, v0.6 import
+              storage/         SQLite WAL, writer thread, rollups, retention, history, migrations + backup, v0.6 import
               service.py       orchestration loops + payload builders
               app.py           FastAPI (REST + WebSocket topics)      devserver.py  stdlib fallback
-web/                           Top table, coin detail, health, universe (vanilla JS modules, canvas charts)
+web/                           Top table, coin detail, health, universe + manual assets (vanilla JS modules, canvas charts)
+tools/                         bootstrap.py (venv / config / data), make_release.py (clean ZIP + verifier), wallet_check.py,
+                               live_onboarding_check.py, selftest.py, feed_stress.py, import_v06.py
 ```
 
 ## Data flow per second
@@ -64,13 +69,129 @@ web/                           Top table, coin detail, health, universe (vanilla
   `/api/top` (every second), `/api/radar` and `/api/alerts` carry to the always-visible bar.
 * **Charts** draw each row of `/api/history/{asset}` → `alerts` as a band from `fired_ts` to `ended_ts`.
   At start-up, `close_open_alerts` ends any alert the previous run left open.
-* **Contract discovery**: `_contracts_loop` runs every 60 s while a provider key is set. It asks
-  `ContractDiscovery` for up to `discovery_calls_per_minute` coin details (pinned coins, then anomalies,
-  then by rank), persists the decisions in `token_contracts`, and calls `IntelMonitor.add_token` for safe
-  native EVM tokens. The monitor verifies the on-chain symbol on the first transfer.
-* **Providers**: `intel/providers.ProviderRegistry` maps a chain to the provider that serves it (today
-  Etherscan V2 for 11 EVM chains). A new chain family plugs in with `supports / tokentx / tokenbalance /
-  stats`; status, discovery and the monitor need no change.
+* **v0.8 changes.** The decision logic above is unchanged. The display and the wallet input change:
+  * WATCH and CONFIRMING have their own labels.
+  * Each entry carries `checks_passed / checks_total` (15) and `gates_passed / gates_total`, plus
+    highlights built from the measured values ("ask supply draining", "bid support building", "sustained
+    buy pressure", "volume accelerating (Nx normal)", "price still flat", wallet line).
+  * The wallet domain reads scores built from the v0.8 event types, gated by the eight-state status
+    (see below).
+  * The note "Evidence score is a composite strength, not a probability" stays on every payload.
+
+## v0.8: universe, manual assets and the asset registry
+
+* **One version.** `server/__init__.py` defines `__version__`. `/api/version`, the UI title, the HTTP
+  user agent, the release ZIP name and `run_windows.bat` (through `tools/bootstrap.py --version`) read it
+  from there. `sw.js` is served with the version substituted, so every release invalidates the PWA cache.
+* **Universe.** `universe.build(rows, …, manual_rows, manual=…)` returns the Top-N members plus the manual
+  assets:
+  * Manual assets are resolved **by CoinGecko id**. Legacy config tickers fall back to a *unique* ticker
+    match. An ambiguous ticker yields candidates, never a guess.
+  * A manual asset that is also a Top-N member is listed once (`manual=True, in_top=True`).
+  * A manual asset whose ticker is taken by a different member is reported, not monitored.
+  * `AssetInfo.manual` is display-only: scoring, sorting and the radar never read it.
+* **Manual-asset lifecycle** (`service.search_assets / resolve_asset / add_manual_asset /
+  remove_manual_asset`, table `manual_assets`, helper `universe/manual.py`):
+  * *Search* calls CoinGecko `/search`.
+  * *Resolve* fetches the coin row and its registry decision, and previews venues from the current exchange
+    catalogs.
+  * *Add* stores the row. `_integrate_manual` then selects venues, creates the `AssetState` and subscribes
+    feeds for that one asset, without a restart and without touching the other assets.
+  * *Remove* unsubscribes a manual-only asset and keeps every stored row. For a Top-N member it only clears
+    the mark.
+  * `config.universe.manual_assets` (`pinned_assets` in v0.7) seeds the table once.
+* **Asset registry** (`intel/registry.py`, table `asset_registry`). `decide(coin)` is a pure function of
+  CoinGecko's coin detail:
+  * a native coin (`BY_NATIVE_COIN`) → READY with the chain's provider;
+  * a token → READY only on its home platform (`asset_platform_id`), with a validated contract (per-family
+    address codec in `intel/addr.py`);
+  * a multi-platform coin without a home platform → NEEDS_VERIFICATION;
+  * a known chain without a provider → UNSUPPORTED "provider not implemented";
+  * a coin CoinGecko does not have → NOT_FOUND.
+
+  Overrides (`assets.overrides`, `intel.tokens`, `PUT /api/assets/{symbol}/override`) always win.
+  `_registry_loop` looks up `discovery_calls_per_minute` coins per minute in priority order, persists the
+  decisions and calls `_sync_wallet_assets`, which tracks the READY entries in the monitor. Entries are
+  re-checked after `discovery_ttl_days`.
+
+## v0.8: wallet providers
+
+* **Interface** (`intel/providers/base.py`). A `WalletProvider` has:
+  * `family`, `chains`, `supports(chain)`, `state(chain)` (ok / off / no_key / degraded + reason) and
+    `normalize_address(chain, address)`;
+  * `fetch_address(chain, address, assets, cursor) → FetchResult(transfers, cursor, complete)`;
+  * `fetch_balance(chain, address, asset)`, optional `fetch_token` (token-wide, EVM only), `stats()` and
+    `secret_values()`.
+
+  Every HTTP call goes through `_call`, which:
+  * paces the call on a `ProviderBudget` (calls per second, daily cap counted per UTC day and persisted with the cursors, back-off
+    after HTTP 429, consecutive-failure tracking);
+  * classifies errors (auth, rate limit, chain unavailable, budget);
+  * scrubs every secret value (API key, private RPC URL) from error texts before they reach logs, Health
+    or the database.
+* **Adapters** (`intel/providers/*.py`) normalise their API into `RawTransfer` rows: chain, asset/token,
+  from, to, amount, tx hash, stable index, timestamp and block. Chain-specific semantics stay inside the
+  adapter:
+  * **Esplora and Koios:** UTXO; change excluded, receipts attributed to the dominant input
+    (`normalize.utxo_transfers`).
+  * **Solana and Hedera:** balance deltas allocated to the counterparties (`normalize.allocate_deltas`).
+  * **XRPL:** `delivered_amount` only.
+  * **TronGrid:** hex addresses → base58check.
+  * **Etherscan V2:** `tokentx` / `txlist` per chain id (XDC = 50) with a newest-first seed, then ascending
+    pages.
+
+  Cursors are opaque JSON per (chain, address), stored in `intel_cursors`.
+* **Registry** (`ProviderRegistry`): `build_providers(icfg, http, budget_store)` creates one provider per
+  enabled family from `intel.providers.<family>`, keeping v0.7's Etherscan keys. `for_chain(chain)`
+  routes; `chain_state(chain)` gives the Health / status view.
+* **Monitor** (`intel/monitor.WalletMonitor`):
+  * One address poll per (chain, labelled address) covers every tracked asset on that chain.
+  * Discovered token contracts are verified on the first transfer's symbol.
+  * Events are de-duplicated by (chain, tx, index), classified (`classify.classify_transfer` → `CEX_IN`,
+    `CEX_OUT`, `ACCUMULATION`, `DISTRIBUTION`, `INTERNAL_SHIFT`, `MM_ROUTING`, `CUSTODY_SHIFT`, `BRIDGE`,
+    `DEX_FLOW`, `UNKNOWN_TRANSFER` with attribution confidence and entity type) and persisted in
+    `onchain_transfers` (the v0.8 columns are added by migration 3).
+  * **Scheduling:** per provider, the base interval comes from the remaining daily budget (70 % for address
+    polls, 20 % for balances, 10 % for token-wide polls). Each asset's tier from `service._tiers` sets the
+    multiplier: 1 anomaly and 2 radar = ×1, 3 manual = ×2, 4 top-50 = ×4, 5 quiet = ×8.
+* **Scores** (`intel/scores.py`): only attributed, reliable events count. `INTERNAL_SHIFT`, `MM_ROUTING`,
+  `CUSTODY_SHIFT` and `BRIDGE` are routing and never count as buying. Unattributed CEX outflow gets half
+  weight in CEX flow and never counts as accumulation.
+* **Status** (`intel/status.asset_status`), checked in this order:
+  1. OFF;
+  2. UNSUPPORTED (registry or chain without a provider);
+  3. DISCOVERING (no registry decision yet);
+  4. N/A (NEEDS_VERIFICATION, rejected contract, no trusted labels, no USD reference);
+  5. NO KEY;
+  6. DEGRADED (provider failing, rate-limited, out of budget, chain not on the plan);
+  7. WARMING (first polls, history window);
+  8. ACTIVE (possibly "partial" while lagging).
+
+  `gate_scores` passes values to the engine only when the state is ACTIVE.
+
+## v0.8: storage, upgrade and release
+
+* **Migration 3** (`storage/schema.migration_3`) is additive and idempotent: each statement checks for the
+  table or column first. `Database.migrate` runs it inside one `BEGIN … COMMIT`, and rolls back on
+  error. Before any pending migration on an existing database, `backup_before_migration` writes an
+  online SQLite backup to `data/backups/`. It skips the backup when free space is below 2× the database
+  size. `app_meta` records the running app version, the first installed version and an upgrade history
+  (version and schema changes). Health → Storage shows the upgrade and the backup file.
+* **Bootstrap** (`tools/bootstrap.py`) is shared by `run_windows.bat` and `run.sh`:
+  * creates the venv and installs the requirements;
+  * copies `config.example.json` → `config.json` **only when missing**;
+  * creates `data/`;
+  * reports the database state.
+
+  It never deletes or replaces anything.
+* **Release** (`tools/make_release.py`) builds from an allow-list (server/, web/, tools/, tests/, docs/,
+  labels/, launchers, examples), then refuses and verifies the archive:
+  * refused: `data/`, `config.json`, `.venv/`, `*.db*`, caches, `.env`, `dist/`;
+  * refused: any file with an SQLite header;
+  * refused: any file containing the value of a set secret environment variable or a key-shaped string;
+  * `--verify` re-checks any ZIP.
+
+  `tests/test_release.py` fails if a prohibited file would be packaged.
 
 ## Requirement → implementation map
 
@@ -98,7 +219,18 @@ web/                           Top table, coin detail, health, universe (vanilla
 | Reshuffling never BUY (v0.7.3) | `alerts._wallet`, `intel/scores.cex_outflow_attributed_share` |
 | Alerts in SQLite + chart marks (v0.7.3) | `storage/schema.py` migration 2, `storage/history.alerts_query`, `web/js/charts.bands` |
 | Explicit wallet states + coverage (v0.7.3) | `intel/status.py`, `web/js/radar.walletCell`, Health panel |
-| EVM contract auto-discovery, provider abstraction (v0.7.3) | `intel/discovery.py`, `intel/providers.py` |
+| EVM contract auto-discovery, provider abstraction (v0.7.3) | superseded in v0.8 by `intel/registry.py`, `intel/providers/` |
+| Top-100 + manual assets, deduplicated, manual never affects score (v0.8) | `universe/universe.py`, `universe/manual.py`, `service.add_manual_asset / remove_manual_asset` |
+| Manual assets UI: search, candidates, preview, confirm, remove (v0.8) | `web/js/universe.js`, `/api/assets/*` |
+| Persistent asset registry, no guessing, overrides (v0.8) | `intel/registry.py`, table `asset_registry` |
+| Provider adapters, one WalletEvent model (v0.8) | `intel/providers/`, `intel/model.py`, `intel/classify.py` |
+| Taxonomy and event types; custody / MM / internal never buying (v0.8) | `intel/labels.py`, `intel/classify.py`, `intel/scores.py` |
+| Eight wallet states, zero ≠ N/A (v0.8) | `intel/status.py`, `web/js/radar.walletCell`, Health |
+| Budget-aware polling with priorities, provider stats (v0.8) | `intel/providers/base.ProviderBudget`, `intel/monitor.schedule`, `service._tiers` |
+| Secrets only as env-var names, scrubbed everywhere (v0.8) | `server/env.py`, `WalletProvider.scrub`, `tools/make_release.py` |
+| Idempotent migration + backup, never overwrite config / DB (v0.8) | `storage/schema.migration_3`, `storage/db.py`, `tools/bootstrap.py` |
+| One canonical version (v0.8) | `server/__init__.py`, `tools/bootstrap.py --version`, `app.py` (`sw.js`) |
+| Clean release ZIP + regression test (v0.8) | `tools/make_release.py`, `tests/test_release.py` |
 
 ## Scoring details
 
