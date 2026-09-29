@@ -1,4 +1,4 @@
-name: v0.8 live wallet providers (real APIs)
+name: v0.8 live validation (real APIs)
 
 # Live checks of CoinGecko metadata discovery and every wallet provider (Bitcoin / XRPL / TRON /
 # Solana / Hedera / Cardano, and Etherscan when an ETHERSCAN_API_KEY secret exists) from
@@ -9,8 +9,9 @@ on:
   push:
     branches: [claude/upbeat-mayer-jkt236]
     paths:
-      - "pre_move_scanner_v07_work/server/intel/**"
+      - "pre_move_scanner_v07_work/server/**"
       - "pre_move_scanner_v07_work/tools/wallet_check.py"
+      - "pre_move_scanner_v07_work/tools/live_onboarding_check.py"
       - ".github/workflows/live-wallet.yml"
   workflow_dispatch:
 
@@ -44,3 +45,32 @@ jobs:
         with:
           name: wallet-check-${{ matrix.os }}
           path: pre_move_scanner_v07_work/data/wallet_check_report.*
+
+  onboarding:
+    name: live universe + manual-asset onboarding / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+        working-directory: pre_move_scanner_v07_work
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+      - name: Live onboarding check (CoinGecko universe, manual asset add / restart / remove, registry, radar)
+        env:
+          COINGECKO_API_KEY: ${{ secrets.COINGECKO_API_KEY }}
+        run: python tools/live_onboarding_check.py --top 20 --seconds 90
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-onboarding-${{ matrix.os }}
+          path: pre_move_scanner_v07_work/data/live_onboarding_report.*

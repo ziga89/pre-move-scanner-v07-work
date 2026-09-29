@@ -56,27 +56,85 @@ MEXC, HTX, Bitfinex, Bitstamp, Bitrue.
 * Bithumb, WhiteBIT, LBank and other exchanges are not in the default list. If ccxt supports them, add them
   and run the self-test.
 
+## Manual assets and the asset registry (v0.8)
+* A manual asset needs a **CoinGecko id**. Coins that CoinGecko does not list cannot be added. An
+  ambiguous ticker (several coins share it) is never resolved automatically: the Universe page lists the
+  candidates and you choose.
+* Two coins in one universe cannot share a ticker. The universe is keyed by symbol, as in v0.7. A manual
+  coin whose ticker is already used by a *different* Top-100 coin is refused, and the reason is shown.
+* A manual asset is monitored only if at least one supported exchange lists a usable spot market for it.
+  Otherwise it stays on the manual list as "no usable market" and is retried at every universe refresh.
+* Metadata discovery is paced at 2 CoinGecko coin lookups per minute (`assets.discovery_calls_per_minute`).
+  A fresh install needs about an hour to fill the registry for 100+ assets. Until an asset's lookup is
+  done, its wallet state is **DISCOVERING**. The results are cached for 30 days.
+* Discovery never guesses:
+  * A token is used only on the chain CoinGecko publishes as its home platform (`asset_platform_id`).
+  * A discovered token contract is marked "on-chain symbol check pending" until the monitor has read a
+    transfer of it and the token symbol there matches. It produces no scores before that. For EVM
+    tokens this needs the Etherscan key. (`walletcheck` additionally checks ERC-20 `symbol()` through a
+    public RPC.)
+  * A multi-chain coin without a home platform is **NEEDS_VERIFICATION** until you set an override
+    (`PUT /api/assets/{symbol}/override` or `assets.overrides`).
+  * Bridged supply on other chains is not tracked.
+
 ## Chains (wallet intelligence)
-* Supported: EVM chains through Etherscan V2 (Ethereum by default; BSC, Polygon, Arbitrum, Optimism,
-  Base, Avalanche, Linea, Scroll, Mantle, Blast are wired but Etherscan's free-tier chain coverage has
-  changed over time — per-chain errors are shown on the Health page).
-* **Not supported**: Bitcoin, XRP Ledger, Solana, Cardano, TRON, TON, **XDC native chain**, Cosmos chains,
-  Hedera, and other non-EVM chains. For those coins MM / Whale / CEX / Scarcity show **UNSUPPORTED**, with
-  the reason. Native EVM gas coins (ETH, BNB, AVAX) are UNSUPPORTED too, because only ERC-20 transfers
-  are tracked.
-* Only labelled addresses you provide are monitored (plus optional token-wide polling for tokens with
-  manageable activity). Without labels the wallet columns stay N/A — by design. Discovery finds a token's
-  contract, but never labels a wallet. Large unlabelled counterparties of exchange transfers are listed
-  as UNKNOWN / WHALE CANDIDATE and are never counted.
-* Contract discovery trusts CoinGecko's `asset_platform_id` (the chain a token is native to) and then
-  re-checks the on-chain symbol. A token that is native to one EVM chain is monitored only there:
-  bridged supply on other chains is not tracked. A coin whose CoinGecko entry has no platform is treated
-  as a native coin (UNSUPPORTED).
-* DEX swap detection (BUY / SELL) requires labelled DEX pool / router addresses; swaps are not decoded.
-* A busy exchange hot wallet can have more transfers than one poll cycle can page through. Such addresses
-  are flagged "lagging", and while they are, wallet scores are multiplied by 0.6 and marked "partial coverage".
-* Token-wide polling is switched off automatically for a token above 400 transfers per hour
-  (`intel.token_wide_max_transfers_per_hour`); after that only address-centric monitoring runs for it.
+Implemented providers (v0.8.0). All of them normalise into the same wallet-event model:
+
+| Chain(s) | Provider | Key |
+|---|---|---|
+| Ethereum, BNB Smart Chain, Base, Arbitrum, OP Mainnet, Polygon, Avalanche C-Chain, Mantle, Linea, Scroll, Blast, **XDC Network** | Etherscan V2 (`etherscan`) | `ETHERSCAN_API_KEY`, required |
+| Bitcoin | Esplora: mempool.space, then blockstream.info (`esplora`) | none |
+| XRP Ledger | public rippled servers: xrplcluster.com, s1/s2.ripple.com (`xrpl`) | none |
+| TRON (TRX + TRC-20) | TronGrid (`trongrid`) | `TRONGRID_API_KEY`, optional |
+| Solana (SOL + SPL) | Solana JSON-RPC (`solana_rpc`) | `SOLANA_RPC_URL`, optional private RPC |
+| Hedera (HBAR + HTS) | Hedera public mirror node (`hedera_mirror`) | none |
+| Cardano (ADA) | Koios (`koios`) | `KOIOS_API_TOKEN`, optional |
+
+* **Not supported** (shown as `UNSUPPORTED · provider not implemented`, never faked):
+  * Sui, Aptos, TON, NEAR, Polkadot, Stellar, Cosmos chains, Algorand, Litecoin, Dogecoin, Bitcoin Cash,
+    Ethereum Classic, Internet Computer, Monero, Tezos;
+  * every other chain not in the table above.
+* **Live verification.** The keyless providers were verified live from GitHub's Ubuntu and Windows runners
+  (`live-wallet.yml`; see `docs/TEST_REPORT_V080.md`). **Etherscan (EVM and XDC) was not live-verified**,
+  because no key was available to the test runners. Verify it with
+  `run_windows.bat walletcheck --only discovery,evm` on your machine.
+* **Etherscan free tier.** It does not cover every chain (e.g. BNB Smart Chain, Base and others may need a
+  paid plan). Such a chain shows **DEGRADED** with Etherscan's own message on the Health page; the other
+  chains are unaffected. XDC is served through Etherscan V2 (chain id 50) and has the same caveat.
+* **Public endpoints.** They are rate-limited, and the limits change without notice. Here is how the
+  scanner copes:
+  * **XRPL.** Busy servers answer `tooBusy`: the provider fails over to the next server and backs off.
+  * **Solana.** The public mainnet RPC throttles hard (HTTP 429). Reading a busy wallet costs one
+    `getTransaction` call per transaction, so such an address will lag. For serious Solana coverage, set
+    `SOLANA_RPC_URL` to a private RPC.
+  * **Cardano.** The public Koios tier is slow (0.5 calls/s by default). Use a stake address in the labels
+    file for exchange wallets.
+  * **TRON.** Without a key, TronGrid is more strictly limited.
+  * **Budgets.** Every provider has a daily call budget and a pace (Health → Wallet providers). When a
+    budget is used up, that provider's chains become DEGRADED until the next UTC day.
+* **Native coins.** Native coins (ETH, BNB, AVAX, XDC, BTC, XRP, TRX, SOL, HBAR, ADA) are tracked through
+  address-centric polling of labelled wallets only. There is no token-wide polling for a native coin.
+  Contract-internal native moves are not included:
+  * EVM internal transactions;
+  * TRON contract-internal TRX.
+* **Cardano.** Native-token balances are not read (ADA only). Native tokens are tracked from transactions
+  where they appear.
+* **Labels.** Only labelled addresses you provide are monitored, plus optional token-wide polling for EVM
+  tokens with manageable activity.
+  * Without trusted labels for a chain, the wallet columns stay **N/A** with that reason. This is by
+    design: discovery finds a token's contract and never labels a wallet.
+  * Large unlabelled counterparties are listed as **WHALE_CANDIDATE** and never counted.
+  * Labels of type `WATCH`, `WHALE_CANDIDATE` or `UNKNOWN`, or with LOW confidence, never feed a score.
+* **UTXO chains (Bitcoin, Cardano).** A receipt is attributed to the dominant input address, and change
+  outputs are excluded. CoinJoin-style transactions and batched exchange withdrawals can therefore
+  attribute a receipt to one of several real senders. Unlabelled counterparties remain UNKNOWN.
+* **DEX flows.** DEX swaps are detected only through labelled DEX pool / router addresses (`DEX_FLOW`).
+  Swaps are not decoded, and DEX flow is never treated as a confirmed purchase.
+* **Lagging.** A busy exchange hot wallet can have more transfers than one poll cycle can page through.
+  Such addresses are flagged "lagging". While they are, wallet scores are multiplied by 0.6 and the state
+  reads "ACTIVE (partial)".
+* **Token-wide polling.** It is switched off automatically for a token above 400 transfers per hour
+  (`intel.token_wide_max_transfers_per_hour`).
 
 ## Signal Radar / high-conviction alerts
 * The thresholds (score levels, venue counts, 120 s persistence, 60 s hysteresis) are set by hand and are
@@ -100,10 +158,15 @@ MEXC, HTX, Bitfinex, Bitstamp, Bitrue.
   ±2 % depth demotes implausible markets but cannot detect all wash trading.
 * **Identity**: a market is the same asset only if its USD price is within ±5 % of CoinGecko's (±12 % for
   KRW). Legitimate large premiums/discounts would be rejected (reason shown).
-* **CoinGecko coin detail** (contract discovery): `asset_platform_id`, `platforms` and `detail_platforms`
-  as published; lookups are paced to 2 per minute on top of the ranking calls.
-* **Etherscan**: transfer lists and balances as published; free-tier limits (~5 calls/s, daily budget
-  configurable, 90 000 by default).
+* **CoinGecko coin detail** (asset registry): `asset_platform_id`, `platforms` and `detail_platforms` as
+  published. Lookups are paced to 2 per minute on top of the ranking calls. `/search` (manual assets) is
+  called only when you search on the Universe page.
+* **Etherscan**: transfer lists and balances as published; free-tier limits (~5 calls/s; 4 calls/s and a
+  90 000-call daily budget by default).
+* **Other wallet providers**: taken as published by the public endpoint.
+  * Default paces: Esplora 1/s, XRPL 2/s, TronGrid 1/s, Solana 2/s, Hedera 2/s, Koios 0.5/s.
+  * Default daily budgets: 20 000 each, except TronGrid at 10 000 and Koios at 4 000.
+  * An endpoint that returns inconsistent data is not cross-checked against a second source.
 
 ## Other
 * SQLite is single-writer; very large deployments (Top 500 with long retention) may prefer a server
