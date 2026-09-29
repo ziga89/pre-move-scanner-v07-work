@@ -2,20 +2,26 @@
   "mode": "live",
   "universe": {
     "target_size": 100,
-    "pinned_assets": [
+    "manual_assets": [
       "QNT",
       "LINK",
       "XDC"
     ],
     "coingecko_ids": {
       "QNT": "quant-network",
-      "LINK": "chainlink"
+      "LINK": "chainlink",
+      "XDC": "xdce-crowd-sale"
     },
     "exclude_symbols": [],
     "include_symbols": [],
     "refresh_minutes": 60,
     "coingecko_api_key_env": "COINGECKO_API_KEY",
     "coingecko_api_key_type": "demo"
+  },
+  "assets": {
+    "discovery_calls_per_minute": 2,
+    "discovery_ttl_days": 30,
+    "overrides": {}
   },
   "discovery": {
     "exchanges": [
@@ -50,7 +56,8 @@
   },
   "storage": {
     "path": "data/scanner_v07.db",
-    "asset_1m_days": 30
+    "asset_1m_days": 30,
+    "backup_before_migration": true
   },
   "intel": {
     "enabled": false,
@@ -59,6 +66,15 @@
     "daily_call_budget": 90000,
     "auto_discover_contracts": true,
     "warmup_minutes": 60,
+    "providers": {
+      "evm": {"enabled": true},
+      "bitcoin": {"enabled": true, "daily_call_budget": 20000},
+      "xrpl": {"enabled": true, "daily_call_budget": 20000},
+      "tron": {"enabled": true, "api_key_env": "TRONGRID_API_KEY", "daily_call_budget": 10000},
+      "solana": {"enabled": true, "rpc_url_env": "SOLANA_RPC_URL", "daily_call_budget": 20000},
+      "hedera": {"enabled": true, "daily_call_budget": 20000},
+      "cardano": {"enabled": true, "api_key_env": "KOIOS_API_TOKEN", "daily_call_budget": 4000}
+    },
     "tokens": {
       "QNT": {
         "chain": "ethereum",

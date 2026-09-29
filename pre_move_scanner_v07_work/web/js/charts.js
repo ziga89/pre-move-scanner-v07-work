@@ -37,7 +37,7 @@ export function empty(canvas, msg = "Collecting history…") {
   ctx.fillText(msg, 52, 32);
 }
 
-// High-conviction alert periods (v0.7.3): green band from fire to end, red line at invalidation.
+// High-conviction alert periods: green band from fire to end, red line at invalidation.
 function bands(ctx, list, X, pad, w, ph, xmax) {
   for (const b of (list || [])) {
     const from = Number(b.fired_ts), to = Number(b.ended_ts || xmax);

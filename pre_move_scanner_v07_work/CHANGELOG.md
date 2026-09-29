@@ -1,5 +1,178 @@
 # Changelog
 
+## v0.8.0 — Multi-chain wallet intelligence and manual assets
+
+### Universe and manual assets
+* **Monitored universe = CoinGecko Top-100 ∪ manual assets**, deduplicated by CoinGecko id. With 100
+  members and 5 manual assets outside them, 105 unique assets are monitored. A manual asset that is
+  already a Top-100 member is marked manual but not duplicated. A manual asset whose ticker belongs to a
+  *different* Top-100 coin is reported, not merged.
+* **Manual assets are persistent** (SQLite `manual_assets`) and replace v0.7 "pinned" coins.
+  * The config list (`universe.manual_assets`, or the v0.7 `universe.pinned_assets`) only seeds symbols
+    never seen before, so removing QNT in the UI is not undone at the next start. QNT, LINK and XDC carry
+    over.
+  * Removing an asset keeps its row and all its history.
+* **Manual status never affects score or sorting.** Ranking is by pre-move score (late / quiet groups
+  as before), with market-cap rank as the tie-break. A manual asset can rank #1 or last.
+* **Never guessed:**
+  * Assets are identified by CoinGecko id. A ticker alone returns candidates and is never auto-resolved.
+  * A seeded v0.7 ticker without a valid id is resolved only if exactly one fetched coin uses it.
+  * An ambiguous ticker waits for your selection. A missing coin is reported.
+* **Universe page → Manual assets.**
+  1. Search by ticker, name or CoinGecko id.
+  2. Candidates show symbol, name, id, rank, price, the venues found in the exchange catalogs, and
+     metadata when it is known.
+  3. The preview shows chain / token platform, contract, wallet-intelligence support and venues.
+  4. Add or remove the asset.
+* **An added asset joins at runtime, with no restart:** venue selection, feed subscription, baseline
+  warm-up, the ranking, Signal Radar / high-conviction eligibility, and metadata discovery.
+* New API endpoints:
+  * `GET /api/assets`, `GET /api/assets/{symbol}`, `GET /api/assets/search?q=`,
+    `GET /api/assets/resolve/{coingecko_id}`;
+  * `POST /api/assets/manual` (`coingecko_id`; `query` only returns candidates with HTTP 409),
+    `DELETE /api/assets/manual/{symbol}`, `PUT /api/assets/{symbol}/override`.
+
+### Asset registry (`server/intel/registry.py`, SQLite `asset_registry`)
+* Every monitored asset gets persistent metadata: symbol, name, CoinGecko id, market-cap rank, manual,
+  native chain, token platform, contract, native asset, wallet provider, wallet supported, discovery
+  confidence, verified, last metadata check, created / updated.
+* It is discovered automatically from the CoinGecko coin detail, paced to 2 calls per minute, cached
+  for 30 days, and failed lookups are retried after 1 h. Nothing is rediscovered on restart.
+* **Decisions (never guessed):**
+  * **Native coins** come from a curated map: BTC, ETH, BNB, AVAX, XRP, TRX, SOL, XDC, HBAR, ADA.
+  * **Tokens** are tracked only on the platform CoinGecko names as native (`asset_platform_id`), with a
+    contract that is well-formed for that chain family. Bridged copies elsewhere are ignored.
+  * **Multi-platform coins without a native platform** get `NEEDS_VERIFICATION`: nothing is tracked
+    until you set an override.
+  * **Chains without a provider** are `UNSUPPORTED · provider not implemented`.
+* **Overrides:** `intel.tokens` (v0.7) or `assets.overrides` / `PUT /api/assets/{symbol}/override`:
+  `{chain, contract, decimals}`, `{chain, native: true}` or `{unsupported: reason}`.
+* A discovered EVM contract is verified on-chain: the first transfer's token symbol must match, or the
+  contract is rejected.
+* The v0.7.3 `token_contracts` cache is migrated (supported rows only).
+
+### Multi-chain wallet providers (`server/intel/providers/`)
+* One interface (`base.WalletProvider`). Each provider normalises raw chain data into the same
+  `RawTransfer` → `WalletEvent` model. Attribution, classification and scoring are shared and never
+  chain-specific.
+
+| Provider | Chains | Assets | Key |
+|---|---|---|---|
+| **Etherscan V2** | Ethereum, BSC, Base, Arbitrum, Optimism, Polygon, Avalanche, Mantle, Linea, Scroll, Blast, XDC (chain 50) | ERC-20 tokens (`tokentx`) and native coins (`txlist`: ETH, BNB, AVAX, XDC) | `ETHERSCAN_API_KEY` |
+| **Esplora** (mempool.space, blockstream.info fallback) | Bitcoin | BTC (UTXO: change and consolidations never counted; receipts attributed to the dominant input) | none |
+| **rippled JSON-RPC** (xrplcluster, s1/s2.ripple.com fail-over) | XRP Ledger | XRP and issued tokens, from `delivered_amount` (partial payments never overstated) | none |
+| **TronGrid** | TRON | TRX (`TransferContract`) and TRC-20 | optional `TRONGRID_API_KEY` |
+| **Solana JSON-RPC** | Solana | SOL and SPL tokens (owner token accounts; balance deltas; supports transaction version 1) | optional private RPC URL in `SOLANA_RPC_URL` |
+| **Hedera mirror node** | Hedera | HBAR and HTS tokens (fee accounts and node fees removed) | none |
+| **Koios** | Cardano | ADA and native tokens (UTXO; stake-key identity) | optional `KOIOS_API_TOKEN` |
+
+* Not implemented, and shown as `UNSUPPORTED · provider not implemented`: Sui, Aptos, TON, NEAR,
+  Polkadot, Stellar, Cosmos, Algorand, Litecoin, Dogecoin, Bitcoin Cash, Ethereum Classic, Internet
+  Computer, Monero, Tezos, and any other chain.
+* **Budget-aware polling** per provider:
+  * calls today are persisted, and each provider has a daily cap and a per-second pace;
+  * HTTP 429 / "too busy" back-off honours Retry-After;
+  * consecutive failures are tracked, along with the last success and last error;
+  * the cap is never exceeded: the call is refused.
+* **Polling priority per asset:** 1 current anomaly, 2 radar WATCH / CONFIRMING, 3 manual, 4 top-50,
+  5 quiet.
+  * Quiet addresses are polled up to 8× less often.
+  * Anomalies are polled twice as often while the budget is healthy.
+* A busy address that cannot be paged through in one poll is marked `lagging`. Its scores are damped
+  and shown as `ACTIVE (partial)`.
+* Etherscan chains that the API plan does not cover are reported per chain with Etherscan's own text,
+  as DEGRADED.
+* Provider error texts, stats and logs never contain an API key or a private RPC URL: they are scrubbed.
+
+### Wallet taxonomy, event types and states
+* **Entity taxonomy:** CEX_HOT, CEX_COLD, CEX_DEPOSIT, CEX_CUSTODY, CUSTODY_INSTITUTIONAL,
+  MARKET_MAKER, DEX_POOL, BRIDGE, TREASURY, WHALE, WHALE_CANDIDATE, UNKNOWN (plus DEX_ROUTER, WATCH and
+  the built-in BURN).
+  * `MM` and `PROTOCOL_TREASURY` are still accepted.
+  * Labels are validated per chain family (base58check, bech32, …). Invalid addresses are rejected.
+* **Event types:** CEX_IN, CEX_OUT, ACCUMULATION, DISTRIBUTION, INTERNAL_SHIFT, MM_ROUTING,
+  CUSTODY_SHIFT, BRIDGE, DEX_FLOW, UNKNOWN_TRANSFER, each with attribution and classification
+  confidence.
+  * Internal exchange moves, exchange ↔ exchange routing, market-maker routing, custody shifts and
+    bridges are excluded from reserve flows and never count as buying.
+  * **Changed from v0.7:** exchange → institutional custody (e.g. Coinbase → Anchorage,
+    Coinbase Hot → Prime) is now a CUSTODY_SHIFT; v0.7 counted it as accumulation-side.
+  * Holder ↔ holder is UNKNOWN_TRANSFER.
+* Stored v0.7 transfers are re-attributed with the current labels when loaded.
+* **Explicit wallet states:** OFF, NO KEY, DISCOVERING, WARMING, ACTIVE, UNSUPPORTED (with the reason),
+  DEGRADED, N/A.
+  * `OK / ON` is now `ACTIVE`, and a pending lookup is `DISCOVERING`.
+  * A real 0 stays 0. Only ACTIVE values reach scoring and the radar.
+
+### Signal Radar
+* WATCH and CONFIRMING are separate headline states and labels.
+* Entries carry the checks passed (e.g. `8/15 checks`) and the gates passed.
+* A HIGH-CONVICTION BUY SETUP lists plain-language evidence: "ask supply draining", "sustained buy
+  pressure", "volume accelerating (2.1x normal)", "price still flat", "wallet / CEX flow supportive" and
+  "active 4m 12s".
+* The wallet chip reads supportive / neutral / unavailable / **contradictory**.
+* Wallet evidence stays an independent, optional domain:
+  * unavailable data raises the pre-move threshold (90) instead of blocking;
+  * supportive lowers it (82);
+  * contradictory vetoes.
+* Manual and non-EVM assets are assessed identically.
+
+### Health
+* A wallet-intelligence table has one row per chain group: Ethereum / EVM, Bitcoin, Solana, XRPL,
+  TRON, XDC, Hedera, Cardano. Each row shows state (with reason), key status, assets covered (and
+  their states), calls / budget, rate-limit state, errors, last success and last error.
+* Global counts of ACTIVE / DISCOVERING / WARMING / UNSUPPORTED / DEGRADED (+ OFF / NO KEY / N/A).
+* Registry discovery progress and the list of chains without a provider.
+* Storage shows the schema version, "new database" / "upgraded from schema N" and the pre-migration
+  backup.
+* New API endpoints: `GET /api/wallet/providers`, `GET /api/wallet/status`, `GET /api/wallet/{symbol}`.
+
+### Database, bootstrap, release safety, version
+* **Migration 3** (automatic, additive, idempotent, one transaction):
+  * adds `asset_registry`, `manual_assets` and `app_meta`, and the new event columns on
+    `onchain_transfers`;
+  * `data/scanner_v07.db` keeps its name, and every row is preserved;
+  * **before migrating an existing database, a consistent SQLite backup** is written to `data/backups/`.
+    It is skipped, and reported, when disk space is short.
+  * an interrupted upgrade leaves the database untouched and simply runs again.
+* **`tools/bootstrap.py`** (standard library only): creates `config.json` from the example only if it
+  is missing (never overwritten) and `data/` if missing, and reports whether the database is new or
+  existing. `--venv` creates `.venv` and installs `requirements.txt`. `run_windows.bat` and the new
+  `run.sh` call it.
+* **`tools/make_release.py`** builds a source-only ZIP from an allow-list and refuses to build or
+  verify an archive that contains any of the following:
+  * `data/`, `config.json` or `.venv/`;
+  * `*.db`, `*.db-wal` or `*.db-shm`, or any file with a SQLite header;
+  * `__pycache__`, caches or reports;
+  * the value of any API-key environment variable, or a CoinGecko-style key.
+
+  Build it with `run_windows.bat release`. The verifier found that the v0.7.4 source ZIP contained 48
+  stale `__pycache__/*.pyc` files. It had no data files and no secrets.
+* **One canonical version** (`server/__init__.py`):
+  * the UI header, title and footer read it from `/api/version`;
+  * the service-worker cache name is filled in by the server;
+  * the HTTP user-agent, the dev-server header, the launcher banner and title (via
+    `bootstrap.py --version`) and the release name all use it.
+
+  A test fails on any hard-coded version in the UI or the launchers.
+* `run_windows.bat walletcheck` / `tools/wallet_check.py` is a live check of CoinGecko discovery and
+  every provider. It picks sample addresses from each chain's latest data and never uses a hard-coded
+  wallet identity.
+
+### Preserved
+* The ARGS forwarding logic of `run_windows.bat` is unchanged, with CRLF line endings.
+* `server/feeds/`, the scoring engine and the baselines are unchanged: the KuCoin lifecycle / rebuild,
+  MEXC protobuf and Coinbase USD/USDC fixes, the honest self-test and the pre-move scoring.
+* The Signal Radar gates, persistence and hysteresis are unchanged, as are alert persistence, chart
+  markers and outcomes.
+* Key loading through `server/env.py` is unchanged.
+* The v0.6 history folder is unchanged (manifest check).
+
+## v0.7.4 — API keys from the Windows user environment (provided build)
+* `server/env.py`: API keys are read by environment-variable name. On Windows the persisted user or
+  machine value (from `setx`) is used when the running shell predates it. The configured name is
+  stripped, so a trailing space cannot turn a present key into NO KEY.
+
 ## v0.7.3 — Signal Radar, explicit wallet-intelligence states, contract discovery
 
 ### Added

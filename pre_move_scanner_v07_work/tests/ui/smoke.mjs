@@ -38,7 +38,7 @@ for (const h of ["Pre‑Move", "Liquidity", "MM", "Whale", "CEX flow", "15m", "1
 const offCells = await page.$$eval("#top-table tbody tr .ws-off", c => c.length);
 check(offCells >= nrows * 3, `wallet cells show explicit OFF state (${offCells})`);
 // Signal Radar: always visible, one of the four headline labels, wallet coverage text
-const RADAR_LABELS = ["NO HIGH-CONVICTION SETUP", "WATCH / CONFIRMING", "HIGH-CONVICTION BUY SETUP", "INVALIDATED"];
+const RADAR_LABELS = ["NO HIGH-CONVICTION SETUP", "WATCH", "CONFIRMING", "HIGH-CONVICTION BUY SETUP", "INVALIDATED"];
 const radarCheck = async (where) => {
   const r = await page.$("#radar");
   check(!!r && await r.isVisible(), `Signal Radar visible on ${where}`);
@@ -48,6 +48,12 @@ const radarCheck = async (where) => {
   check(RADAR_LABELS.some(l => label.startsWith(l)), `radar label "${label}" on ${where}`);
 };
 await radarCheck("overview");
+// one canonical version: header, footer and title all show what /api/version reports
+const apiVersion = await page.evaluate(async () => (await (await fetch("/api/version")).json()).version);
+await page.waitForFunction(v => document.querySelector("#vtag").textContent === "v" + v, apiVersion, { timeout: 10000 });
+check((await page.textContent("#footer-version")).includes("v" + apiVersion), `footer shows v${apiVersion}`);
+check((await page.title()).includes("v" + apiVersion), `title shows v${apiVersion}`);
+check(!!(await page.$("#f-manual")), "manual-only filter present");
 check((await page.textContent("#radar")).includes("Wallet intel OFF"), "radar shows wallet-intel coverage (OFF)");
 check((await page.textContent("#radar")).includes("not proof of a purchase"), "radar carries the evidence caveat");
 await page.screenshot({ path: shots + "/ui_top.png", fullPage: false });
@@ -87,11 +93,33 @@ await page.waitForSelector("#health table", { timeout: 10000 });
 check((await page.textContent("#health")).includes("simex_"), "health lists exchanges");
 check((await page.textContent("#health")).includes("Wallet intelligence"), "health shows wallet-intelligence coverage");
 check((await page.textContent("#health")).includes("Signal Radar"), "health shows radar state");
+const htxt = await page.textContent("#health");
+for (const c of ["Ethereum / EVM", "Bitcoin", "Solana", "XRPL", "TRON", "XDC", "Hedera", "Cardano"])
+  check(htxt.includes(c), `health: wallet provider row ${c}`);
+for (const s of ["ACTIVE", "DISCOVERING", "WARMING", "UNSUPPORTED", "DEGRADED"])
+  check(htxt.includes(s), `health: global wallet state count ${s}`);
+check(htxt.includes("provider not implemented"), "health: unsupported chains carry the reason");
 await radarCheck("health view");
 await page.screenshot({ path: shots + "/ui_health.png", fullPage: true });
 await page.goto(base + "/#/universe");
 await page.waitForSelector("#universe table", { timeout: 10000 });
 check((await page.$$("#universe tbody tr")).length >= 5, "universe members listed");
+// manual assets: search -> candidates -> preview -> add (no restart) -> listed -> remove
+check(!!(await page.$("#manual-q")), "manual assets: search box present");
+await page.fill("#manual-q", "echo");
+await page.click("#manual-form button[type=submit]");
+await page.waitForSelector("#manual-cands tbody tr", { timeout: 10000 });
+check((await page.textContent("#manual-cands")).includes("ECHO"), "manual assets: candidate listed");
+await page.waitForSelector("#manual-preview [data-add]", { timeout: 10000 });
+check((await page.textContent("#manual-preview")).includes("Wallet intelligence"), "manual assets: preview shows wallet support");
+await page.click("#manual-preview [data-add]");
+await page.waitForFunction(() => document.querySelector(".manual-table") && document.querySelector(".manual-table").textContent.includes("ECHO"), null, { timeout: 10000 });
+check((await page.textContent("#manual-msg")).includes("ECHO"), "manual assets: add confirmed");
+await page.screenshot({ path: shots + "/ui_universe.png", fullPage: true });
+page.once("dialog", d => d.accept());
+await page.click('.manual-table [data-remove="ECHO"]');
+await page.waitForFunction(() => !document.querySelector(".manual-table").textContent.includes("ECHO"), null, { timeout: 10000 });
+check(true, "manual assets: remove works");
 
 // mobile: no horizontal page scroll
 const m = await browser.newPage({ viewport: { width: 390, height: 844 } });

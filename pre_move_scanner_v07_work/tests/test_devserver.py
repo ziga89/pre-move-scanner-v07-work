@@ -66,6 +66,51 @@ class DevServerTest(unittest.TestCase):
         self.assertIn("radar", top)
         self.assertEqual(top["wallet_intel"]["text"], "Wallet intel OFF")
 
+    def req(self, method, path, body=None):
+        data = json.dumps(body).encode() if body is not None else None
+        r = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=data, method=method,
+                                   headers={"Content-Type": "application/json"} if data else {})
+        try:
+            with urllib.request.urlopen(r, timeout=30) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read() or b"{}")
+
+    def test_v08_asset_and_wallet_routes(self):
+        from server import __version__
+        for p in ("/api/assets", "/api/wallet/providers", "/api/wallet/status", "/api/assets/search?q=bravo"):
+            code, _, body = self.get(p)
+            self.assertEqual(code, 200, p)
+            json.loads(body)
+        top = json.loads(self.get("/api/top")[2])
+        a = top["rows"][0]["asset"]
+        self.assertEqual(json.loads(self.get(f"/api/assets/{a}")[2])["symbol"], a)
+        self.assertEqual(json.loads(self.get(f"/api/wallet/{a}")[2])["asset"], a)
+        prov = json.loads(self.get("/api/wallet/providers")[2])
+        self.assertEqual([c["label"] for c in prov["chains"]],
+                         ["Ethereum / EVM", "Bitcoin", "Solana", "XRPL", "TRON", "XDC", "Hedera", "Cardano"])
+        self.assertIn("Sui", prov["not_implemented"])
+        # manual asset lifecycle over HTTP (SIM coin ids)
+        code, body = self.req("POST", "/api/assets/manual", {"query": "delta"})
+        self.assertEqual(code, 409)                                   # a ticker alone: candidates, nothing added
+        self.assertEqual([c["coingecko_id"] for c in body["candidates"]], ["delta"])
+        code, body = self.req("POST", "/api/assets/manual", {"coingecko_id": "delta"})
+        self.assertEqual((code, body["status"]), (200, "added"))
+        self.assertIn("DELTA", [m["symbol"] for m in json.loads(self.get("/api/universe")[2])["manual"]])
+        self.assertEqual(self.req("DELETE", "/api/assets/manual/DELTA")[0], 200)
+        self.assertEqual(self.req("DELETE", "/api/assets/manual/DELTA")[0], 404)
+        self.assertEqual(self.req("POST", "/api/assets/manual", {"coingecko_id": "nope-id"})[0], 404)
+        self.assertEqual(self.req("PUT", f"/api/assets/{a}/override", {"chain": "xdc", "native": True})[0], 400)  # SIM
+        # one canonical version: /api/version, payloads and the service-worker cache name
+        self.assertEqual(json.loads(self.get("/api/version")[2])["version"], __version__)
+        sw = self.get("/sw.js")[2].decode()
+        self.assertIn(f'premove-v{__version__}', sw)
+        self.assertNotIn("__VERSION__", sw)
+        for p in ("/api/assets/NOPE", "/api/wallet/NOPE"):
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                self.get(p)
+            self.assertEqual(cm.exception.code, 404, p)
+
     def test_static_and_errors(self):
         code, ctype, body = self.get("/")
         self.assertIn(b"Pre", body)

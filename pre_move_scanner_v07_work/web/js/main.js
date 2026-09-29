@@ -1,12 +1,28 @@
 // Router + wiring.
 import { closeCoin, initCoin, openCoin, renderCoin } from "./coin.js";
 import { Conn } from "./conn.js";
-import { renderHealth, renderUniverse } from "./health.js";
+import { renderHealth } from "./health.js";
 import { initTop, renderTop } from "./top.js";
+import { load as loadUniverse } from "./universe.js";
 import { $, $$ } from "./util.js";
 
 let view = "top";
 let coinTopic = null;
+let version = "";           // from the server (canonical server/__init__.py); never hard-coded here
+let currentAsset = null;
+
+function setTitle() {
+  const v = version ? ` v${version}` : "";
+  document.title = currentAsset ? `${currentAsset} · Pre‑Move Scanner${v}` : `Pre‑Move Scanner${v}`;
+}
+
+function setVersion(v) {
+  if (!v || v === version) return;
+  version = v;
+  $("#vtag").textContent = "v" + v;
+  $("#footer-version").textContent = "Pre‑Move Scanner v" + v;
+  setTitle();
+}
 
 const conn = new Conn(onMessage, onState);
 
@@ -19,22 +35,17 @@ function onState(s) {
 
 function onMessage(topic, data) {
   if (topic === "top") {
+    setVersion(data.version);
     renderTop(data);
     const m = $("#mode");
     m.textContent = (data.mode || "").toUpperCase();
     m.className = "modetag " + (data.mode || "");
   } else if (topic === "health") {
+    setVersion(data.version);
     if (view === "health") renderHealth(data);
   } else if (topic && topic.startsWith("coin:")) {
     renderCoin(data);
   }
-}
-
-async function loadUniverse() {
-  try {
-    const r = await fetch("/api/universe", { cache: "no-store" });
-    renderUniverse(await r.json());
-  } catch (e) { $("#universe").textContent = "Universe unavailable: " + e; }
 }
 
 function route() {
@@ -56,10 +67,11 @@ function route() {
     openCoin(asset);
     coinTopic = "coin:" + asset;
     conn.subscribe(coinTopic);
-    document.title = `${asset} · Pre‑Move Scanner v0.7.3`;
+    currentAsset = asset;
   } else {
-    document.title = "Pre‑Move Scanner v0.7.3";
+    currentAsset = null;
   }
+  setTitle();
   if (next === "health") conn.subscribe("health"); else conn.unsubscribe("health");
   if (next === "health") fetch("/api/health", { cache: "no-store" }).then(r => r.json()).then(renderHealth).catch(() => {});
   if (next === "universe") loadUniverse();
@@ -68,6 +80,7 @@ function route() {
 
 initTop();
 initCoin();
+fetch("/api/version", { cache: "no-store" }).then(r => r.json()).then(d => setVersion(d.version)).catch(() => {});
 window.addEventListener("hashchange", route);
 route();
 conn.start();

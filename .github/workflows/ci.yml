@@ -1,4 +1,4 @@
-name: v0.7 CI
+name: CI
 
 on:
   push:
@@ -32,12 +32,37 @@ jobs:
         run: python tools/print_capabilities.py
       - name: Self-test tool, offline SIM mode
         run: python tools/selftest.py --sim --seconds 8
-      - name: Windows launcher end-to-end (venv, pip, comma arguments, exit code)
+      - name: Clean release ZIP (build + verify - no data/, config.json, .venv/, DB files or secrets)
+        run: python tools/make_release.py --out dist
+      - name: Clean install from the release ZIP with a real venv + pip install
+        if: matrix.python == '3.12'
+        env:
+          PMS_TEST_FULL_BOOTSTRAP: "1"
+        run: python -m unittest tests.test_bootstrap -v
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        with:
+          name: release-zip
+          path: pre_move_scanner_v07_work/dist/*.zip
+      - name: Windows launcher end-to-end (venv, pip, bootstrap, version, comma arguments, exit code)
         if: runner.os == 'Windows' && matrix.python == '3.12'
         shell: cmd
         env:
           PMS_NO_PAUSE: "1"
         run: run_windows.bat selftest --sim --seconds 4 --repeat 2 --assets QNT,XDC,LINK
+      - name: Windows launcher never overwrites config.json / data
+        if: runner.os == 'Windows' && matrix.python == '3.12'
+        shell: cmd
+        env:
+          PMS_NO_PAUSE: "1"
+        run: |
+          .venv\Scripts\python.exe -c "import json; json.dump({'mode': 'sim', 'universe': {'target_size': 7}}, open('config.json', 'w'))"
+          call run_windows.bat release --out dist_win
+          if errorlevel 1 exit /b 1
+          .venv\Scripts\python.exe -c "import json; assert json.load(open('config.json'))['universe']['target_size'] == 7, 'config.json overwritten'"
+          if errorlevel 1 exit /b 1
+          if not exist data\selftest_report.md exit /b 1
+          .venv\Scripts\python.exe -c "import glob, subprocess, sys; z = glob.glob('dist_win/*.zip'); sys.exit(subprocess.call([sys.executable, 'tools/make_release.py', '--verify', z[0]]))"
 
   web:
     name: web UI (JS syntax, lint, headless browser)

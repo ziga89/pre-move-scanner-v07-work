@@ -159,8 +159,8 @@ async def run(args) -> int:
             k = e["reason"].split(" (")[0].split(":")[0]
             excl[k] = excl.get(k, 0) + 1
         rec("7 universe", "PASS" if len(u["members"]) == cfg["universe"]["target_size"] else "WARN",
-            f"{len(u['members'])} coins; cutoff rank {u['cutoff_rank']}; excluded: {excl}; pinned: "
-            + ", ".join(f"{p.get('symbol', '').upper()}={p.get('status')}" for p in u["pinned"]),
+            f"{len(u['members'])} coins; cutoff rank {u['cutoff_rank']}; excluded: {excl}; manual: "
+            + ", ".join(f"{p.get('symbol', '').upper()}={p.get('status')}" for p in u["manual"]),
             data={"members": [m["symbol"].upper() for m in u["members"]], "excluded": u["excluded"][:80]})
     by_sym = {}
     for r in rows:
@@ -188,10 +188,12 @@ async def run(args) -> int:
         only = [x.strip().lower() for x in args.exchanges.split(",") if x.strip()]
         markets = stream_markets(selections, good, fx, examples, only)
         await stream_check(cfg, adapters, markets, fx, args.seconds, args.repeat)
-    if cfg["intel"].get("enabled") or os.getenv(cfg["intel"].get("etherscan_api_key_env", "ETHERSCAN_API_KEY")):
+    from server.env import env_secret
+    if cfg["intel"].get("enabled") or env_secret(cfg["intel"].get("etherscan_api_key_env"), "ETHERSCAN_API_KEY"):
         await etherscan_check(cfg, http)
     else:
-        rec("10 Etherscan", "SKIP", "wallet intelligence not enabled and no API key set")
+        rec("10 Etherscan", "SKIP", "wallet intelligence not enabled and no API key set "
+                                    "(all wallet providers: run_windows.bat walletcheck)")
     if args.save_fixtures and rows:
         out = ROOT / "tests" / "fixtures" / "live"
         out.mkdir(parents=True, exist_ok=True)
@@ -226,8 +228,9 @@ async def run_sim(cfg, args, http) -> int:
     fx = FxService()
     vs = VenueSelector(cfg["discovery"])
     now = time.time()
-    u = UniverseManager(dict(cfg["universe"], pinned_assets=[])).build(
-        rows, {}, lambda r: (bool(vs.preview(AssetInfo.from_row(r), good.values(), fx, now).selected), ""), [], now)
+    u = UniverseManager(cfg["universe"]).build(
+        rows, {}, lambda r: (bool(vs.preview(AssetInfo.from_row(r), good.values(), fx, now).selected), ""), [], now,
+        manual=[])
     rec("7 universe", "PASS" if u["members"] else "FAIL", f"{len(u['members'])} coins")
     selections = {}
     for r in rows[:3]:

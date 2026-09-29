@@ -130,9 +130,9 @@ class EvmProvider(WalletProvider):
             status = getattr(exc, "status", None)
             if status == 429:
                 self.budget.rate_limited(getattr(exc, "retry_after", None), "HTTP 429 from Etherscan")
-                raise EtherscanRateLimited(str(exc)) from None
+                raise EtherscanRateLimited(self.scrub(str(exc))) from None
             self.budget.fail(f"{type(exc).__name__}: {exc}")
-            raise EtherscanError(str(exc)) from None
+            raise EtherscanError(self.scrub(f"{type(exc).__name__}: {exc}")) from None
         if isinstance(data, dict) and "jsonrpc" in data and "status" not in data:     # module=proxy answers
             if data.get("error"):
                 err = data["error"]
@@ -151,7 +151,7 @@ class EvmProvider(WalletProvider):
             self.chain_errors.pop(chain, None)
             self.budget.ok()
             return []
-        text = f"{msg}: {result}" if isinstance(result, str) else msg
+        text = self.scrub(f"{msg}: {result}" if isinstance(result, str) else msg)
         low = text.lower()
         if "invalid api key" in low or ("missing" in low and "key" in low):
             self.budget.fail(text)

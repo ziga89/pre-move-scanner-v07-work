@@ -27,7 +27,7 @@ function head(d) {
   const late = d.late || {};
   $("#coin-head").innerHTML = `
     <div>
-      <div class="big">${esc(d.asset)} <small>${esc(d.name || "")}${info.rank ? " · #" + info.rank : ""}${d.pinned ? " · pinned ★" : ""}</small></div>
+      <div class="big">${esc(d.asset)} <small>${esc(d.name || "")}${info.rank ? " · #" + info.rank : ""}${d.manual ? " · <span class='mbadge'>M</span> manual asset" : ""}</small></div>
       <div style="margin-top:8px">${badge(d.status)} <span class="muted small">since ${ago(d.status_since)}</span></div>
       <div class="kv">
         ${kv("Price", price(d.price))}${kv("15m", signedPct(r[15] ?? r["15"]))}${kv("1h", signedPct(r[60] ?? r["60"]))}
@@ -159,49 +159,65 @@ function leadlag(d) {
     <table class="mini"><thead><tr><th>Venue</th><th class="num">Lag</th><th class="num">Corr.</th><th></th></tr></thead><tbody>${llRows || "<tr><td colspan=4 class='muted'>needs ≥ 2 live venues with price changes</td></tr>"}</tbody></table>`;
 }
 
-const SCORE_NAMES = { mm: "Market maker", whale: "Whale / custody", cex_flow: "CEX flow", scarcity: "Scarcity" };
+const SCORE_NAMES = { mm: "Market maker", whale: "Whale / treasury", cex_flow: "CEX flow", scarcity: "Scarcity" };
 
-function walletStatusBlock(ws, intel) {
+function registryLine(reg, ws) {
+  const r = reg || {};
+  const chain = r.chain_name || (ws && ws.chain_name) || r.native_chain;
+  if (!chain && !r.state) return "";
+  const kind = r.native_asset ? "native coin" : r.contract_address ? "token" : "";
+  const src = r.source === "override" ? "manual override (verified)" : r.verified ? "on-chain verified" :
+    r.contract_address ? "discovered from CoinGecko; on-chain symbol check pending" : r.native_asset ? "curated native coin" : "";
+  return `<p class="small"><b>${esc(chain || "—")}</b>${kind ? " · " + kind : ""}${r.contract_address ? ` · <code>${esc(r.contract_address)}</code>` : ""}
+    ${r.wallet_provider ? ` · provider ${esc(r.wallet_provider)}` : ""}${src ? ` · <span class="muted">${esc(src)}</span>` : ""}
+    ${r.state && r.state !== "READY" ? `<br><span class="muted">${esc(r.state)}: ${esc(r.reason || "")}</span>` : ""}</p>`;
+}
+
+function walletStatusBlock(ws, intel, reg) {
   if (!ws) return "";
   const sc = ws.scores || {};
   const rows = Object.keys(SCORE_NAMES).map(k => `<tr><td>${SCORE_NAMES[k]}</td><td>${walletCell(intel ? intel[k] : null, sc[k])}</td>
     <td>${esc((sc[k] || {}).direction || "")}</td><td class="wrap muted small">${esc((sc[k] || {}).reason || "")}</td></tr>`).join("");
-  const token = ws.contract ? `<span class="muted small">${esc(ws.chain || "")} · <code>${esc(ws.contract)}</code> · ${esc(ws.source === "discovered" ? "discovered from CoinGecko platforms (native token), on-chain symbol verified on first transfer" : "configured")}</span>` : "";
   const cands = (ws.whale_candidates || []).map(c => `<tr><td><code>${esc((c.address || "").slice(0, 12))}…</code></td><td>${esc(c.side)} ${esc(c.counterparty || "")}</td>
     <td class="num">${money(c.usd)}</td><td>${fmtDateTime(c.ts)}</td></tr>`).join("");
   const share = isNum(ws.cex_outflow_attributed_share) ? ` · exchange outflow attributed to labelled holders: ${(100 * ws.cex_outflow_attributed_share).toFixed(0)}%` : "";
-  return `<p>${walletState(ws)} ${token}</p>
+  return `<p>${walletState(ws)}</p>${registryLine(reg, ws)}
     <table class="mini"><thead><tr><th>Score</th><th>State / value</th><th>Direction</th><th>Why</th></tr></thead><tbody>${rows}</tbody></table>
-    <p class="muted small">States: OFF (disabled) · NO KEY (no ETHERSCAN_API_KEY) · WARMING (contract lookup / first polls / history window) · UNSUPPORTED (chain not covered) · N/A (no reliable attribution) — never shown as 0.${share}</p>
+    <p class="muted small">States: OFF · NO KEY · DISCOVERING (chain / contract lookup) · WARMING (first polls / history window) · ACTIVE ·
+      UNSUPPORTED (with the reason, e.g. provider not implemented) · DEGRADED (provider rate-limited / failing / out of budget) ·
+      N/A (no reliable attribution) — a real 0 is shown as 0, never as N/A.${share}</p>
     ${cands ? `<h3 style="margin-top:10px">UNKNOWN / WHALE CANDIDATE <span class="muted small">unlabelled counterparties of large exchange transfers — no identity inferred, not counted in any score</span></h3>
       <table class="mini"><thead><tr><th>Address</th><th>Transfer</th><th class="num">USD</th><th>Time</th></tr></thead><tbody>${cands}</tbody></table>` : ""}`;
 }
 
 function wallet(d) {
   const w = d.wallet;
-  const status = walletStatusBlock(d.wallet_status, d.intel);
+  const status = walletStatusBlock(d.wallet_status, d.intel, d.registry);
   if (!w) {
-    $("#coin-wallet").innerHTML = status + `<p class="muted small">To enable: set <code>intel.enabled</code> in config.json,
-      set an Etherscan API key and add trusted labels in <code>labels/wallet_labels.csv</code>.</p>`;
+    $("#coin-wallet").innerHTML = status + `<p class="muted small">To enable: set <code>intel.enabled</code> in config.json. Bitcoin, XRPL,
+      TRON, Solana, Hedera and Cardano providers need no key; EVM chains and XDC need <code>ETHERSCAN_API_KEY</code>. Scores need trusted
+      labels in <code>labels/wallet_labels.csv</code>.</p>`;
     return;
   }
   const cov = w.coverage || {};
   const intel = d.intel || {};
   const bal = (w.balances || []).map(b => `<tr><td>${esc(b.entity)} <span class="muted small">${esc(b.entity_type || "")}</span></td>
     <td class="num">${num(b.balance, 0)}</td>${["1h", "6h", "24h", "7d"].map(k => `<td class="num">${b.delta[k] == null ? "—" : num(b.delta[k], 0)}</td>`).join("")}</tr>`).join("");
-  const tx = (w.recent || []).slice(0, 25).map(t => `<tr><td>${fmtDateTime(t.ts)}</td><td><span class="badge">${esc(t.classification)}</span></td>
+  const tx = (w.recent || []).slice(0, 25).map(t => `<tr><td>${fmtDateTime(t.ts)}</td><td><span class="badge">${esc(t.event_type || t.classification)}</span>
+    <div class="muted small">${esc(t.attribution_confidence ? "attribution " + t.attribution_confidence : "")}</div></td>
     <td class="num">${num(t.amount, 0)}</td><td class="num">${money(t.usd_value)}</td>
     <td class="wrap">${esc(t.from_entity || (t.from_addr || "").slice(0, 10) + "…")} → ${esc(t.to_entity || (t.to_addr || "").slice(0, 10) + "…")}
     <div class="muted small">${esc(t.explanation || "")}</div></td></tr>`).join("");
   $("#coin-wallet").innerHTML = status + `
-    <p class="small">${cov.covered ? `<span class="ok">Covered</span> · ${cov.polled}/${cov.addresses} labelled addresses polled${(cov.lagging || []).length ? ` · <span class="warn">${cov.lagging.length} lagging</span>` : ""} · token‑wide: ${esc(cov.token_wide || "off")}`
-      : `<span class="warn">Not covered:</span> ${esc(cov.reason || "")}`}</p>
+    <p class="small">${cov.covered ? `<span class="ok">Covered</span> · ${cov.polled}/${cov.addresses} labelled addresses polled${(cov.lagging || []).length ? ` · <span class="warn">${cov.lagging.length} lagging</span>` : ""} · token‑wide: ${esc(cov.token_wide || "off")}${cov.provider ? " · " + esc(cov.provider) : ""}`
+      : `<span class="warn">Not covered:</span> ${esc(cov.reason || "")}`}${cov.note ? `<br><span class="muted">${esc(cov.note)}</span>` : ""}</p>
     ${(intel.reasons || []).length ? `<ul class="reasons">${intel.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>` : ""}
     <div class="scroll"><table class="mini"><thead><tr><th>Entity</th><th class="num">Balance</th><th class="num">Δ1h</th><th class="num">Δ6h</th><th class="num">Δ24h</th><th class="num">Δ7d</th></tr></thead>
     <tbody>${bal || "<tr><td colspan=6 class='muted'>no balance snapshots yet</td></tr>"}</tbody></table></div>
-    <div class="scroll" style="margin-top:10px"><table class="mini"><thead><tr><th>Time</th><th>Class</th><th class="num">Amount</th><th class="num">USD</th><th>Route</th></tr></thead>
+    <div class="scroll" style="margin-top:10px"><table class="mini"><thead><tr><th>Time</th><th>Event</th><th class="num">Amount</th><th class="num">USD</th><th>Route</th></tr></thead>
     <tbody>${tx || "<tr><td colspan=5 class='muted'>no labelled transfers in memory</td></tr>"}</tbody></table></div>
-    <p class="muted small">Classes are conservative: a CEX withdrawal is not a purchase; Coinbase Hot → Prime is SHIFT (custody/internal).</p>`;
+    <p class="muted small">Events are conservative: a CEX withdrawal (CEX_OUT) is not a purchase; internal exchange moves, custody shifts
+      (e.g. Coinbase Hot → Prime) and market-maker routing are never counted as buying.</p>`;
 }
 
 function timeline(events) {

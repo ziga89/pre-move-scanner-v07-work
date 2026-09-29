@@ -51,6 +51,10 @@ class SolanaProvider(WalletProvider):
     def normalize_address(self, chain: str, address: str) -> Optional[str]:
         return solana_address(address)
 
+    def secret_values(self) -> List[str]:
+        # a private RPC URL usually embeds its API key: never shown anywhere
+        return super().secret_values() + ([self.rpc_url] if self.private_rpc else [])
+
     async def rpc(self, method: str, params: List[Any]) -> Any:
         self._id += 1
         data = await self.post(self.rpc_url, {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})

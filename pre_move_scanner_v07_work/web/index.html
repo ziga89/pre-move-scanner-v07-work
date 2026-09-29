@@ -9,13 +9,13 @@
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0f14'/%3E%3Cpath d='M5 22h6l3-9 4 12 3-7h6' fill='none' stroke='%23f5c451' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/styles.css">
-  <title>Pre‑Move Scanner v0.7.3</title>
+  <title>Pre‑Move Scanner</title>
 </head>
 <body>
 <header>
   <div class="brand">
-    <h1>Pre‑Move Scanner <span class="vtag">v0.7.3</span> <span id="mode" class="modetag"></span></h1>
-    <p>Top‑100 universe · abnormal structure while price is still flat</p>
+    <h1>Pre‑Move Scanner <span id="vtag" class="vtag"></span> <span id="mode" class="modetag"></span></h1>
+    <p>Top‑100 + manual assets · abnormal structure while price is still flat</p>
   </div>
   <nav>
     <a href="#/" data-view="top">Anomalies</a>
@@ -45,7 +45,7 @@
           <option value="LOW CONFIDENCE">LOW CONFIDENCE</option>
         </select>
         <label class="chk"><input id="f-hide-late" type="checkbox" checked> hide late moves</label>
-        <label class="chk"><input id="f-pinned" type="checkbox"> pinned only</label>
+        <label class="chk"><input id="f-manual" type="checkbox"> manual only</label>
       </div>
     </div>
     <div id="summary" class="summary"></div>
@@ -63,7 +63,9 @@
       </table>
     </div>
     <p class="muted small">Ranked by Pre‑Move score (early structure while price is flat), not by market cap.
-      LATE / MOVE IN PROGRESS rows sort below every early signal. <b>N/A</b> = no reliable data (never treated as 0). Wallet cells show their state: OFF · NO KEY · WARMING · UNSUPPORTED · N/A (no reliable attribution) or the value.</p>
+      LATE / MOVE IN PROGRESS rows sort below every early signal; manual assets (<span class="mbadge">M</span>) rank exactly like the others.
+      <b>N/A</b> = no reliable data (never treated as 0). Wallet cells show their state: OFF · NO KEY · DISCOVERING · WARMING · UNSUPPORTED ·
+      DEGRADED · N/A (no reliable attribution) or the ACTIVE value.</p>
   </section>
 
   <section id="view-coin" class="view" hidden>
@@ -107,6 +109,7 @@
   <section id="view-universe" class="view" hidden><div id="universe"></div></section>
 </main>
 <footer class="muted small">
+  <span id="footer-version"></span> ·
   Research instrument, not trading advice. Thin books can reflect volatility controls, market‑maker risk
   reduction, maintenance or delistings; wallet transfers can be custody / internal moves. Cancellations are
   estimated (removed liquidity minus aggressive fills), never proven.

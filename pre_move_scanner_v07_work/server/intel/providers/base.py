@@ -42,8 +42,10 @@ class ProviderChainUnavailable(ProviderError):
 
 class ProviderBudget:
     def __init__(self, name: str, daily: int, per_second: float, store: Optional[Dict[str, int]] = None,
-                 clock: Callable[[], float] = time.time, sleep=asyncio.sleep, day_key: Optional[str] = None):
+                 clock: Callable[[], float] = time.time, sleep=asyncio.sleep, day_key: Optional[str] = None,
+                 scrub: Optional[Callable[[str], str]] = None):
         self.name = name
+        self.scrub = scrub or (lambda text: text)
         self.daily = max(0, int(daily))
         self.per_second = max(0.05, float(per_second))
         self.store = store if store is not None else {}
@@ -93,7 +95,7 @@ class ProviderBudget:
     def fail(self, msg: str) -> None:
         self.errors += 1
         self.consecutive_failures += 1
-        self.last_error = str(msg)[:300]
+        self.last_error = self.scrub(str(msg))[:300]
         self.last_error_ts = self.clock()
 
     def rate_limited(self, retry_after: Optional[float], msg: str = "rate limited") -> None:
@@ -144,8 +146,18 @@ class WalletProvider:
         self.key = env_secret(self.key_env, self.key_env) if self.key_env else ""
         self.budget = ProviderBudget(self.name, int(self.cfg.get("daily_call_budget", self.default_daily)),
                                      float(self.cfg.get("calls_per_second", self.default_per_second)),
-                                     budget_store, clock=clock, sleep=sleep, day_key=day_key)
+                                     budget_store, clock=clock, sleep=sleep, day_key=day_key, scrub=self.scrub)
         self.chain_errors: Dict[str, str] = {}
+
+    def secret_values(self) -> List[str]:
+        """Values that must never reach a log, an error text, the health page or the database."""
+        return [v for v in (self.key,) if v]
+
+    def scrub(self, text: str) -> str:
+        for v in self.secret_values():
+            if v and len(v) >= 4:
+                text = text.replace(v, "***")
+        return text
 
     # ---------------------------------------------------------------- state
     @property
@@ -187,14 +199,14 @@ class WalletProvider:
                 raise ProviderRateLimited(str(exc)) from None
             if exc.status in (401, 403):
                 self.budget.fail(str(exc))
-                raise ProviderAuthError(f"{self.label}: {exc}") from None
+                raise ProviderAuthError(self.scrub(f"{self.label}: {exc}")) from None
             self.budget.fail(str(exc))
-            raise ProviderError(f"{self.label}: {exc}") from None
+            raise ProviderError(self.scrub(f"{self.label}: {exc}")) from None
         except (ProviderError, asyncio.CancelledError):
             raise
         except Exception as exc:                  # network errors, timeouts, bad JSON
             self.budget.fail(f"{type(exc).__name__}: {exc}")
-            raise ProviderError(f"{self.label}: {type(exc).__name__}: {exc}") from None
+            raise ProviderError(self.scrub(f"{self.label}: {type(exc).__name__}: {exc}")) from None
         self.budget.ok()
         return res
 

@@ -37,6 +37,19 @@ class FastApiTest(unittest.TestCase):
                           "/manifest.json", "/sw.js"):
                     self.assertEqual(client.get(p).status_code, 200, p)
                 self.assertIn("state", client.get("/api/radar").json())
+                # v0.8 routes
+                for p in ("/api/assets", f"/api/assets/{a}", "/api/assets/search?q=bravo", "/api/wallet/providers",
+                          "/api/wallet/status", f"/api/wallet/{a}"):
+                    self.assertEqual(client.get(p).status_code, 200, p)
+                self.assertEqual(client.post("/api/assets/manual", json={"query": "delta"}).status_code, 409)
+                r = client.post("/api/assets/manual", json={"coingecko_id": "delta"})
+                self.assertEqual((r.status_code, r.json()["status"]), (200, "added"))
+                self.assertEqual(client.delete("/api/assets/manual/DELTA").status_code, 200)
+                self.assertEqual(client.delete("/api/assets/manual/DELTA").status_code, 404)
+                self.assertEqual(client.get("/api/assets/NOPE").status_code, 404)
+                from server import __version__
+                self.assertIn(f"premove-v{__version__}", client.get("/sw.js").text)
+                self.assertEqual(client.get("/api/version").json()["version"], __version__)
                 self.assertIn("alerts", client.get("/api/alerts/history").json())
                 self.assertEqual(client.get("/api/coin/NOPE").status_code, 404)
                 self.assertEqual(client.get("/api/history/QNT?hours=1000").status_code, 422)

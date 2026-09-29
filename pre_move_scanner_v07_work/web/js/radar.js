@@ -1,4 +1,4 @@
-// Always-visible Signal Radar bar (v0.7.3) and explicit wallet-intelligence chips.
+// Always-visible Signal Radar bar and explicit wallet-intelligence chips.
 import { $, esc, isNum, scoreCell } from "./util.js";
 
 const STATE_CLASS = { NONE: "none", WATCH: "watch", CONFIRMING: "confirming", HIGH_CONVICTION: "hc", INVALIDATED: "invalid" };
@@ -16,7 +16,7 @@ export function dur(seconds) {
 
 // A wallet score cell: the value when it is real, otherwise the explicit state.
 export function walletCell(v, st) {
-  if (st && st.state === "OK" && isNum(v)) return scoreCell(v, false);
+  if (st && (st.state === "ACTIVE" || st.state === "OK") && isNum(v)) return scoreCell(v, false);
   const state = (st && st.state) || "WARMING";
   const label = (st && st.label) || state;
   const why = (st && st.reason) || "";
@@ -28,8 +28,9 @@ export function walletChip(w) {
   const state = w.state || (w.status === "unavailable" ? "NA" : "OK");
   let text = w.label || state;
   if (w.status === "supportive") text = "supportive";
-  else if (w.status === "hostile") text = "hostile";
+  else if (w.status === "hostile") text = "contradictory";
   else if (w.status === "neutral") text = "neutral";
+  else if (w.status === "unavailable") text = "unavailable" + (w.label ? ` (${w.label})` : "");
   const cls = w.status === "supportive" ? "ok" : w.status === "hostile" ? "bad" : (state || "na").toLowerCase();
   const tip = [w.reason, (w.reshuffle_not_counted || []).length ? "reshuffling seen, not counted: " + w.reshuffle_not_counted.join(", ") : ""]
     .filter(Boolean).join(" · ");
@@ -44,20 +45,22 @@ function venuesText(e) {
 
 function entryHTML(e, now) {
   const ev = isNum(e.evidence_score) ? `${Number(e.evidence_score).toFixed(0)}/100` : "—";
-  const reasons = (e.reasons || []).slice(0, 3).map(esc).join(" · ");
+  const reasons = (e.state === "HIGH_CONVICTION" && (e.highlights || []).length ? e.highlights : (e.reasons || []))
+    .slice(0, 6).map(esc).join(" · ");
+  const gates = isNum(e.checks_total) && e.state !== "INVALIDATED" ? ` · ${e.checks_passed}/${e.checks_total} checks` : "";
   let time = "";
-  if (e.state === "HIGH_CONVICTION") time = `held ${dur(e.persistence_s)}${e.dipping ? " · <b class='warn'>confirmation dipping</b>" : ""}`;
-  else if (e.state === "CONFIRMING") {
+  if (e.state === "CONFIRMING") {
     const pct = Math.min(100, 100 * (e.persistence_s || 0) / (e.persistence_required_s || 120));
-    time = `confirming ${dur(e.persistence_s)} / ${dur(e.persistence_required_s)} <span class="rbar"><i style="width:${pct.toFixed(0)}%"></i></span>`;
+    time = `persistence ${dur(e.persistence_s)} / ${dur(e.persistence_required_s)} <span class="rbar"><i style="width:${pct.toFixed(0)}%"></i></span>`;
   } else if (e.state === "WATCH") time = `watching ${dur(e.persistence_s)}`;
+  if (e.state === "HIGH_CONVICTION") time = `active ${dur(e.persistence_s)}${e.dipping ? " · <b class='warn'>confirmation dipping</b>" : ""}`;
   else if (e.state === "INVALIDATED") time = `ended ${dur(now - (e.ended_ts || now))} ago after ${dur(e.persistence_s)}`;
   const extra = e.state === "INVALIDATED"
     ? `<span class="r-why">${esc(e.end_reason || "")}${isNum(e.price_change_pct) ? ` · price ${e.price_change_pct >= 0 ? "+" : ""}${Number(e.price_change_pct).toFixed(1)}% since fire` : ""}</span>`
     : (e.state === "WATCH" || e.state === "CONFIRMING") && (e.missing || []).length
       ? `<span class="r-why">still missing: ${(e.missing || []).slice(0, 3).map(esc).join("; ")}</span>` : "";
   return `<b class="r-asset">${esc(e.asset)}</b><strong class="r-ev" title="composite evidence score — not a probability">${ev}</strong>` +
-    `<span class="r-meta">${venuesText(e)} · ${time}</span>${walletChip(e.wallet)}` +
+    `<span class="r-meta">${venuesText(e)}${gates} · ${time}</span>${walletChip(e.wallet)}` +
     (reasons ? `<span class="r-reasons">${reasons}</span>` : "") + extra;
 }
 

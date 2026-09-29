@@ -57,7 +57,7 @@ function passes(r) {
   if (st === "LATE" && !LATE.has(r.status)) return false;
   if (st && st !== "premove" && st !== "LATE" && r.status !== st) return false;
   if ($("#f-hide-late").checked && LATE.has(r.status) && st !== "LATE") return false;
-  if ($("#f-pinned").checked && !r.pinned) return false;
+  if ($("#f-manual").checked && !r.manual) return false;
   return true;
 }
 
@@ -82,7 +82,7 @@ export function renderTop(data) {
     let tr = rowsByAsset.get(r.asset);
     if (!tr) { tr = buildRow(r); rowsByAsset.set(r.asset, tr); }
     setCell(tr, "pos", String(r.position));
-    setCell(tr, "coin", `<b>${esc(r.asset)}</b>${r.pinned ? "<span class='pin' title='pinned (in addition to the Top 100)'>★</span>" : ""}<small>${esc(r.name || "")}${r.rank ? " · #" + r.rank : ""}</small>`);
+    setCell(tr, "coin", `<b>${esc(r.asset)}</b>${r.manual ? "<span class='mbadge' title='manual asset (ranked like every other asset)'>M</span>" : ""}<small>${esc(r.name || "")}${r.rank ? " · #" + r.rank : ""}</small>`);
     const quiet = QUIET.has(r.status);
     setCell(tr, "pm", quiet ? subCell(null, true) : `<span title="fast ${r.fast ?? "—"} · slow ${r.slow ?? "—"}">${scoreCell(r.premove)}</span>`);
     setCell(tr, "liq", subCell(r.liquidity, quiet));
@@ -112,7 +112,7 @@ export function renderTop(data) {
 }
 
 export function initTop() {
-  for (const id of ["#f-search", "#f-status", "#f-hide-late", "#f-pinned"]) {
+  for (const id of ["#f-search", "#f-status", "#f-hide-late", "#f-manual"]) {
     $(id).addEventListener("input", () => renderTop(last));
     $(id).addEventListener("change", () => renderTop(last));
   }
