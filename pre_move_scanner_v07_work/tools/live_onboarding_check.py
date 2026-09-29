@@ -81,8 +81,8 @@ async def patiently(step: str, fn, waits=(60.0, 120.0)):
 
 
 async def live_universe(svc: ScannerService) -> bool:
-    """The first start may have found CoinGecko unreachable; retry like the service does (2, 4 minutes)."""
-    for wait in (120.0, 240.0):
+    """The first start may have found CoinGecko unreachable; retry like the service does (2, 4, 8 minutes)."""
+    for wait in (120.0, 240.0, 480.0):
         if svc.universe_live:
             return True
         rec("universe", "WARN", f"no live CoinGecko ranking yet ({svc.status.get('universe')}); "
