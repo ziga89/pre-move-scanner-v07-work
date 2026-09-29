@@ -10,8 +10,8 @@ results, and what was **not** verified and still needs your machine. Nothing her
 | Automated suite | 288 tests (220 in v0.7.4; 68 new), Python 3.11 / 3.12 / 3.13 on Ubuntu and Windows (GitHub Actions `CI`) | all pass; 1 skip by design (full-bootstrap test, run as its own CI step) |
 | Same suite, cloud container | Python 3.12 without PyPI access (no fastapi / ccxt / aiohttp) | 288 run, all pass; 8 skipped because those packages are missing |
 | Web UI | `node --check`, ESLint, Playwright smoke test in SIM mode (desktop and 390 px phone) | all pass; the manual-asset flow was clicked through: search → candidates → preview → add → remove |
-| Release ZIP | `tools/make_release.py` build + `--verify` (CI Ubuntu and Windows, and the cloud container) | **CLEAN**; 147 files; no `data/`, `config.json`, `.venv/`, database files, caches or secrets |
-| Clean install | release ZIP unpacked into an empty folder, real venv + `pip install`, app started (CI, Ubuntu, Python 3.12) | pass |
+| Release ZIP | `tools/make_release.py` build + `--verify` (CI Ubuntu and Windows, and the cloud container) | **CLEAN**; 148 files at the final commit; no `data/`, `config.json`, `.venv/`, database files, caches or secrets |
+| Clean install | release ZIP unpacked into an empty folder, real venv + `pip install`, app started (CI, Python 3.12 on Ubuntu and on Windows) | pass |
 | Windows launcher | `run_windows.bat` end-to-end on `windows-latest`: venv, pip, bootstrap, version, comma arguments, exit code, `release` | pass; an existing `config.json` was **not** overwritten |
 | v0.6 history folder | `sha256sum -c v06_manifest.sha256` (CI on every push, and locally) | 20/20 files unchanged |
 | Upgrade from v0.7.x | a v0.7.3-shaped schema-2 database with rows in every table (`tests/test_upgrade_v08.py`) | every row kept, backup written first, idempotent, atomic |
@@ -57,21 +57,29 @@ Each change is required by the v0.8 specification. No assertion was relaxed to m
 ## CI (GitHub Actions)
 
 Workflow `CI` (`.github/workflows/ci.yml`) runs on every push:
-* 6 jobs: Python 3.11 / 3.12 / 3.13 × Ubuntu / Windows. Each runs the syntax check, the full suite (with
-  FastAPI, WebSocket, real ccxt and worker processes), the exchange capability matrix from the installed
-  ccxt, `selftest --sim`, the clean release ZIP build and verify, the clean install from that ZIP with a
-  real venv, and on Windows `run_windows.bat` end-to-end plus the "never overwrites config.json" check.
+* 6 jobs: Python 3.11 / 3.12 / 3.13 × Ubuntu / Windows.
+  * Each runs the syntax check, the full suite (with FastAPI, WebSocket, real ccxt and worker processes),
+    the exchange capability matrix from the installed ccxt, `selftest --sim`, and the clean release ZIP
+    build and verify.
+  * The Python 3.12 jobs also run the clean install from that ZIP with a real venv and `pip install`.
+  * The Windows 3.12 job also runs `run_windows.bat` end-to-end and the "never overwrites config.json"
+    check.
 * the web UI job: `node --check`, ESLint, Playwright;
 * the v0.6 integrity job.
 
 Results:
-* run 15 (`48b17dc`): all 8 jobs green;
-* run 16 (`ea4b9d3`): all 8 jobs green;
-* on Ubuntu with Python 3.12: `Ran 286 tests … OK (skipped=1)`, and the full-bootstrap step `Ran 7 tests …
-  OK`;
-* the release step printed "release: dist/pre_move_scanner_v0.8.0.zip (147 files, 0.58 MB) — verified: no
-  data/, config.json, .venv/, database files, caches or secrets";
-* the Windows `run_windows.bat release` printed `CLEAN`.
+* **Run 15** (`48b17dc`): all 8 jobs green.
+  * Ubuntu, Python 3.12: `Ran 286 tests … OK (skipped=1)`; the full-bootstrap step `Ran 7 tests … OK`.
+  * The release step printed "release: dist/pre_move_scanner_v0.8.0.zip (147 files, 0.58 MB) — verified:
+    no data/, config.json, .venv/, database files, caches or secrets".
+  * The Windows `run_windows.bat release` printed `CLEAN`.
+* **Run 16** (`ea4b9d3`): all 8 jobs green.
+* **Runs 17–19** (`d5d5814`, `02e150a`, `c325388`; these include the universe-retry fix and `app_meta`):
+  all 8 jobs green each time.
+  * Run 19, Ubuntu, Python 3.12: `Ran 288 tests … OK (skipped=1)`; the full-bootstrap step `Ran 7 tests …
+    OK`.
+  * Release: 148 files, 0.61 MB, verified.
+* The final commit of this report is checked by CI again.
 
 The release ZIP built by CI is attached to each run as the artifact `release-zip`.
 
