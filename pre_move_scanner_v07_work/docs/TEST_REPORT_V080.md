@@ -101,6 +101,22 @@ The Windows Solana FAIL was the public endpoint refusing the shared runner IP, n
 normalisation error. The provider backed off as designed. `wallet_check.py` now retries twice with longer
 waits and reports a check that stays refused as **NOT VERIFIED (WARN)**.
 
+Runs 5 and 6 (`d5d5814`, `c325388`), with the retry handling, finished with **0 FAIL in all four jobs**:
+
+| Run | Ubuntu | Windows |
+|---|---|---|
+| 5 | 58 checks, 0 FAIL, 8 WARN | 58 checks, 0 FAIL, 6 WARN |
+| 6 | 59 checks, 0 FAIL, 8 WARN | 58 checks, 0 FAIL, 7 WARN |
+
+* CoinGecko discovery was 15/15 again, and the ERC-20 symbols 4/4.
+* Bitcoin, XRPL (one `tooBusy` retry in some runs), TRON, Hedera and Cardano passed.
+* **Solana SOL** was NOT VERIFIED in all four jobs: the public RPC still answered HTTP 429 after two
+  retries. SOL passed on Ubuntu in run 3.
+* **Solana SPL** passed on Ubuntu in run 6 (28 transfers) and in run 3. In two jobs the tool had picked
+  the wrapped-SOL mint as its sample. Those token accounts are short-lived, so the poll found 0 transfers
+  (WARN). The sample picker now skips wrapped SOL.
+* For real Solana coverage, set `SOLANA_RPC_URL` to a private RPC (see KNOWN_LIMITATIONS).
+
 What each provider row means:
 * **probe:** chain tip reached.
 * **sample:** a real, active address picked from the chain's latest data. No wallet identity is
@@ -147,6 +163,28 @@ First run (`ea4b9d3`):
 
   Fixed: it is now retried after 2, 4, 8, … minutes (covered by a unit test). The script now takes its
   candidate from the ranking the service already fetched, and reports refusals as NOT VERIFIED.
+
+Runs 5 and 6 (`d5d5814`, `c325388`). In run 6 the onboarding jobs ran alone, after the wallet checks, one
+OS at a time. CoinGecko refused `/coins/markets` (HTTP 403) for the **whole** run on both runners, even
+after 2 + 4 + 8 minutes of retries. CoinGecko's `/coins/{id}` answered normally from the same runners
+minutes earlier.
+* **Verified live (22 checks, 0 FAIL):**
+  * the manual assets QNT, LINK and XDC are monitored with their CoinGecko ids, even with no ranking;
+  * metadata: QNT and LINK are Ethereum tokens with their contracts (config overrides), and XDC is the
+    native coin of XDC Network;
+  * wallet states: NO KEY for Ethereum and XDC, each with a reason; the other providers are OK;
+  * ranking by score: manual assets are not pinned;
+  * the radar state is NO HIGH-CONVICTION SETUP, with the "not a probability" note;
+  * a restart on the same database: schema 3, not a new install, `app_meta` previous version 0.8.0,
+    registry cached.
+* **NOT VERIFIED live:**
+  * the Top-N composition in these runs (it was verified in run 4 on Windows, see above);
+  * adding a rank 251–500 coin at runtime against real exchanges;
+  * removal of it with its history kept.
+
+  These paths are covered by `tests/test_manual_assets.py` (real service in SIM mode, CoinGecko calls
+  faked) and by the Playwright flow. Run the live check once on your PC (command below); your home
+  connection is not a shared cloud IP.
 
 ## Upgrade, downgrade, data safety
 

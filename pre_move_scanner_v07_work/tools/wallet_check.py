@@ -35,6 +35,7 @@ from server.universe.coingecko import CoinGeckoClient  # noqa: E402
 from server.universe.http import HttpClient  # noqa: E402
 
 RESULTS: List[Dict[str, Any]] = []
+WSOL_MINT = "So11111111111111111111111111111111111111112"
 DISCOVERY_IDS = [  # (symbol, CoinGecko id, expected decision)
     ("QNT", "quant-network", "ethereum token"), ("LINK", "chainlink", "ethereum token"),
     ("UNI", "uniswap", "ethereum token"), ("AAVE", "aave", "ethereum token"),
@@ -210,7 +211,9 @@ async def check_solana(p) -> None:
                 for b in meta.get("postTokenBalances") or [] if b.get("owner")}
         pre = {(b.get("owner"), b.get("mint")): int((b.get("uiTokenAmount") or {}).get("amount") or 0)
                for b in meta.get("preTokenBalances") or [] if b.get("owner")}
-        changed = [k for k in set(post) | set(pre) if post.get(k, 0) != pre.get(k, 0)]
+        # wrapped SOL lives in short-lived token accounts (opened and closed within one transaction): a poor
+        # sample for "an address that holds an SPL token", so it is skipped
+        changed = sorted(k for k in set(post) | set(pre) if post.get(k, 0) != pre.get(k, 0) and k[1] != WSOL_MINT)
         if not changed:
             continue
         owner, mint = changed[0]
