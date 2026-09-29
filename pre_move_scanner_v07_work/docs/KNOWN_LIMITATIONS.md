@@ -153,7 +153,11 @@ Implemented providers (v0.8.0). All of them normalise into the same wallet-event
 * **CoinGecko**: market-cap ranking, prices and categories are taken as published. Free tiers are rate
   limited. The client stays under 8 calls/min by default. The ranking needs 2 calls per hour (2 pages of
   250), plus occasional category and cross-check lookups. If CoinGecko is down, the last cached universe is
-  used and flagged.
+  used and flagged. On a first start without a cache, only the manual assets are monitored, and the
+  ranking is retried after 2, 4, 8, … minutes (`universe.retry_minutes`).
+  * CoinGecko's keyless API sometimes refuses shared cloud IPs with HTTP 403; this was seen on a GitHub
+    runner. A free Demo key (`COINGECKO_API_KEY`) raises the rate limits; whether it also avoids such blocks was
+    not tested.
 * **Exchange 24h volume** from `fetch_tickers` is taken as reported; a wash-volume check against visible
   ±2 % depth demotes implausible markets but cannot detect all wash trading.
 * **Identity**: a market is the same asset only if its USD price is within ±5 % of CoinGecko's (±12 % for

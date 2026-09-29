@@ -123,8 +123,8 @@
   their states), calls / budget, rate-limit state, errors, last success and last error.
 * Global counts of ACTIVE / DISCOVERING / WARMING / UNSUPPORTED / DEGRADED (+ OFF / NO KEY / N/A).
 * Registry discovery progress and the list of chains without a provider.
-* Storage shows the schema version, "new database" / "upgraded from schema N" and the pre-migration
-  backup.
+* Storage shows the schema version, "new database" / "upgraded from schema N", the previous app version
+  and the pre-migration backup.
 * New API endpoints: `GET /api/wallet/providers`, `GET /api/wallet/status`, `GET /api/wallet/{symbol}`.
 
 ### Database, bootstrap, release safety, version
@@ -134,7 +134,8 @@
   * `data/scanner_v07.db` keeps its name, and every row is preserved;
   * **before migrating an existing database, a consistent SQLite backup** is written to `data/backups/`.
     It is skipped, and reported, when disk space is short.
-  * an interrupted upgrade leaves the database untouched and simply runs again.
+  * an interrupted upgrade leaves the database untouched and simply runs again;
+  * `app_meta` records the running app version, the first installed version and an upgrade history.
 * **`tools/bootstrap.py`** (standard library only): creates `config.json` from the example only if it
   is missing (never overwritten) and `data/` if missing, and reports whether the database is new or
   existing. `--venv` creates `.venv` and installs `requirements.txt`. `run_windows.bat` and the new
@@ -157,7 +158,22 @@
   A test fails on any hard-coded version in the UI or the launchers.
 * `run_windows.bat walletcheck` / `tools/wallet_check.py` is a live check of CoinGecko discovery and
   every provider. It picks sample addresses from each chain's latest data and never uses a hard-coded
-  wallet identity.
+  wallet identity. A check that a public endpoint keeps rate-limiting is reported as NOT VERIFIED.
+* `tools/live_onboarding_check.py` is a live end-to-end check of the real service, using its own
+  database:
+  * Top-N plus manual assets;
+  * adding a coin ranked 251–500 at runtime, then streaming it;
+  * metadata discovery and wallet states;
+  * ranking and radar;
+  * restart persistence;
+  * removal with history kept.
+
+### Fixed
+* When CoinGecko is unreachable and no cached ranking exists, the manual assets are still monitored.
+  Previously the ranking was retried only at the next hourly refresh. It is now retried after 2, 4, 8, …
+  minutes (`universe.retry_minutes`), up to the normal interval. Found by the live onboarding check:
+  CoinGecko refused a GitHub runner with HTTP 403.
+* Removed the unused v0.7 module `server/intel/discovery.py`, superseded by the asset registry.
 
 ### Preserved
 * The ARGS forwarding logic of `run_windows.bat` is unchanged, with CRLF line endings.

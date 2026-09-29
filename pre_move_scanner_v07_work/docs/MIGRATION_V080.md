@@ -119,7 +119,9 @@ run_windows.bat walletcheck
 run_windows.bat
 ```
 
-* `run_windows.bat test`: the automated tests, 290+.
+* `run_windows.bat test`: the automated tests, 288 in v0.8.0. From the release ZIP, 2 are skipped by
+  design: the full venv + pip bootstrap test (enable it with `set PMS_TEST_FULL_BOOTSTRAP=1`) and the
+  `.gitignore` check, which needs a git checkout.
 * `run_windows.bat selftest --repeat 2`: exchanges and feeds, as in v0.7.
 * `run_windows.bat walletcheck`: CoinGecko discovery and every wallet provider, EVM included, when your
   key is set. It writes `data\wallet_check_report.md`.
