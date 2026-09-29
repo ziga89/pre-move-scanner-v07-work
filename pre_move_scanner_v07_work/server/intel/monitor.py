@@ -265,7 +265,9 @@ class WalletMonitor:
             demand = sum(c / TIER_MULT[t] for _, _, t, c in items)
             base_iv = max(min_iv, secs_left * demand / (0.7 * remaining))
             for chain, lab, tier, _ in items:
-                iv = max(min_iv, base_iv * TIER_MULT[tier])
+                # the tier multiplies the budget-derived base (never below the minimum interval), so quiet
+                # assets are polled up to 8x less often even when the budget is ample
+                iv = max(min_iv, base_iv) * TIER_MULT[tier]
                 if tier == 1 and p.remaining_today() > 0.5 * p.daily:
                     iv = max(min_iv, iv / 2)         # anomaly and a healthy budget: poll twice as often
                 st = self.addr_state.setdefault((chain, lab.address), {"next": 0.0})

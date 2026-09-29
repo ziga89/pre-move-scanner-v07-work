@@ -1,11 +1,18 @@
-"""Top-N universe with back-fill, pinned extras and membership hysteresis.
+"""Top-N universe with back-fill, manual assets and membership hysteresis.
 
 Definition (v0.7 amendment 7): walk down the market-cap ranking — past rank
 100 if necessary — until there are `target_size` (100) coins that are both
 *eligible* (not stable / wrapped / staked / bridged / tokenised gold / config
 excluded) and *usable* (at least one verified-available spot market with
-enough volume). Pinned coins (QNT, XDC, LINK, …) are monitored in addition to
-those 100 and never count toward them.
+enough volume). Manual assets (v0.8; v0.7 "pinned" coins such as QNT, XDC,
+LINK) are monitored in addition to those 100 and never count toward them:
+monitored universe = Top-N ∪ manual, deduplicated by CoinGecko id. A manual
+asset that is already a Top-N member is not duplicated, and a manual asset
+whose ticker belongs to a *different* Top-N coin is reported, not merged.
+
+Manual assets are identified by CoinGecko id, never by ticker alone. A seeded
+v0.7 ticker without an id is resolved only when exactly one fetched coin uses
+it; an ambiguous ticker waits for your selection on the Universe page.
 
 Hysteresis: members stay while they remain eligible+usable and their rank is
 within `exit_rank_buffer` of the cutoff; a newcomer replaces an existing
@@ -28,11 +35,12 @@ class UniverseManager:
 
     def build(self, rows: List[Dict[str, Any]], category_ids: Dict[str, Set[str]],
               usable: Callable[[Dict[str, Any]], Tuple[bool, str]],
-              pinned_rows: Optional[List[Dict[str, Any]]] = None, now: float = 0.0) -> Dict[str, Any]:
+              manual_rows: Optional[List[Dict[str, Any]]] = None, now: float = 0.0,
+              manual: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         n = int(self.cfg.get("target_size", 100))
         buffer = int(self.cfg.get("exit_rank_buffer", 15))
         need = int(self.cfg.get("entry_confirmations", 2))
-        pinned_syms = [s.upper() for s in self.cfg.get("pinned_assets", [])]
+        pinned_syms = [s.upper() for s in (self.cfg.get("pinned_assets") or self.cfg.get("manual_assets") or [])]
         ids_override = {k.upper(): v for k, v in (self.cfg.get("coingecko_ids") or {}).items()}
 
         rows = sorted((r for r in rows if r.get("market_cap_rank")), key=lambda r: r["market_cap_rank"])
@@ -90,26 +98,56 @@ class UniverseManager:
                     del new_members[m["id"]]
         self.members = new_members
 
-        # pinned extras (in addition to the N)
-        pinned: List[Dict[str, Any]] = []
-        pool = {str(r.get("symbol", "")).upper(): r for r in reversed(rows)}  # highest rank wins
-        for r in pinned_rows or []:
-            pool.setdefault(str(r.get("symbol", "")).upper(), r)
-        by_id = {r["id"]: r for r in rows + list(pinned_rows or [])}
-        member_syms = {str(r.get("symbol", "")).upper() for r in self.members.values()}
-        for sym in pinned_syms:
-            r = by_id.get(ids_override.get(sym, "")) or pool.get(sym)
-            if r is None:
-                pinned.append({"symbol": sym, "id": ids_override.get(sym), "status": "not found on CoinGecko"})
+        # manual assets (in addition to the N; never duplicated)
+        extra = list(manual_rows or [])
+        by_id = {r["id"]: r for r in rows + extra}
+        by_sym: Dict[str, List[Dict[str, Any]]] = {}
+        for r in list(by_id.values()):
+            by_sym.setdefault(str(r.get("symbol", "")).upper(), []).append(r)
+        member_ids = set(self.members)
+        member_by_sym = {str(r.get("symbol", "")).upper(): r for r in self.members.values()}
+        if manual is None:          # v0.7 call: symbols from the config, ids from coingecko_ids
+            manual = [{"symbol": s, "coingecko_id": ids_override.get(s), "source": "config"} for s in pinned_syms]
+        out_manual: List[Dict[str, Any]] = []
+        for m in manual:
+            sym = str(m.get("symbol", "")).upper()
+            cid = m.get("coingecko_id")
+            r = by_id.get(cid) if cid else None
+            if r is not None:
+                resolved = False
+            elif cid and m.get("source") != "config":
+                out_manual.append({"symbol": sym, "id": cid, "manual": True, "usable": False,
+                                   "status": f"CoinGecko id '{cid}' not found"})
                 continue
-            if sym in member_syms:
-                continue  # already one of the 100
+            else:       # seeded from the config without a (valid) id: unique ticker only, never a guess
+                cands = by_sym.get(sym, [])
+                if len(cands) != 1:
+                    why = (f"ambiguous ticker: {len(cands)} CoinGecko coins use {sym} - select one on the Universe page"
+                           if cands else f"{sym} not found in the CoinGecko ranking - search and add it on the Universe page")
+                    out_manual.append({"symbol": sym, "id": None, "manual": True, "usable": False, "status": why,
+                                       "candidates": [{"id": c["id"], "name": c.get("name"),
+                                                       "rank": c.get("market_cap_rank")} for c in cands[:8]]})
+                    continue
+                r, resolved = cands[0], True
+            rsym = str(r.get("symbol", "")).upper()
+            base = {**r, "symbol": rsym, "manual": True, "pinned": True, "resolved_by_ticker": resolved}
+            if r["id"] in member_ids:
+                out_manual.append({**base, "usable": True, "in_top": True, "status": "in the Top-100 (not duplicated)"})
+                continue
+            clash = member_by_sym.get(rsym)
+            if clash is not None:
+                out_manual.append({**base, "usable": False, "in_top": False,
+                                   "status": f"ticker {rsym} is already used by Top-100 member {clash.get('name')} "
+                                             f"({clash['id']}); not monitored separately"})
+                continue
             ok, why = usable(r)
-            pinned.append({**r, "pinned": True, "usable": ok, "status": "ok" if ok else (why or "no usable venue")})
+            out_manual.append({**base, "usable": ok, "in_top": False, "status": "ok" if ok else (why or "no usable venue")})
 
         members = sorted(self.members.values(), key=lambda r: r["market_cap_rank"])
         self.last = {
-            "ts": now, "target": n, "members": members, "pinned": pinned, "excluded": excluded,
+            "ts": now, "target": n, "members": members, "manual": out_manual,
+            "pinned": [m for m in out_manual if not m.get("in_top")],          # v0.7 view: extras only
+            "excluded": excluded,
             "eligible_count": len(eligible), "cutoff_rank": cutoff, "deepest_rank_scanned": rows[-1]["market_cap_rank"] if rows else None,
             "short_by": max(0, n - len(members)), "pending": dict(self.pending),
         }

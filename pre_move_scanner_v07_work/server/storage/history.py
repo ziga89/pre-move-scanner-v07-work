@@ -315,3 +315,25 @@ def outcome_summary(con: sqlite3.Connection, since: float) -> List[Dict[str, Any
         "SELECT status, COUNT(*) AS n, AVG(fwd_15m) AS avg_15m, AVG(fwd_1h) AS avg_1h, AVG(fwd_4h) AS avg_4h, "
         "AVG(fwd_24h) AS avg_24h, SUM(CASE WHEN fwd_1h > 2 THEN 1 ELSE 0 END) AS hits_1h_2pct "
         "FROM signal_outcomes WHERE ts>=? GROUP BY status ORDER BY n DESC", (since,))]
+
+
+# ---------------------------------------------------------------- v0.8 asset registry / app metadata
+
+def load_registry(con: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    try:
+        return {str(r["symbol"]).upper(): dict(r) for r in con.execute("SELECT * FROM asset_registry")}
+    except sqlite3.Error:
+        return {}
+
+
+def registry_row(d: Dict[str, Any]) -> tuple:
+    from ..intel.registry import REGISTRY_COLS
+    return tuple(d.get(c) for c in REGISTRY_COLS)
+
+
+def meta_get(con: sqlite3.Connection, key: str) -> Optional[str]:
+    try:
+        r = con.execute("SELECT value FROM app_meta WHERE key=?", (key,)).fetchone()
+        return r[0] if r else None
+    except sqlite3.Error:
+        return None

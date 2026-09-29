@@ -108,6 +108,11 @@ class CoinGeckoClient:
                                                     "developer_data": "false", "sparkline": "false"})
         return data if isinstance(data, dict) else {}
 
+    async def search(self, query: str) -> List[Dict[str, Any]]:
+        """CoinGecko /search: coins whose name / symbol / id match (id, name, symbol, market_cap_rank)."""
+        data = await self.get("/search", {"query": query})
+        return list((data or {}).get("coins") or []) if isinstance(data, dict) else []
+
     def stats(self) -> Dict[str, Any]:
         return {"base": self.base, "keyed": bool(self.headers), "calls": self.calls,
                 "rate_limited": self.rate_limited, "errors": self.errors, "last_error": self.last_error}

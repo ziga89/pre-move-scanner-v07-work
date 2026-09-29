@@ -14,13 +14,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import Body, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .config import load_config
-from .service import ScannerService
+from .service import ManualAssetError, ScannerService
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
@@ -154,7 +154,9 @@ def create_app(cfg: Optional[Dict[str, Any]] = None, service: Optional[ScannerSe
 
     @app.get("/sw.js")
     async def sw():
-        return FileResponse(WEB / "sw.js", media_type="application/javascript")
+        # the cache name carries the canonical version (no hand-edited cache key)
+        body = (WEB / "sw.js").read_text(encoding="utf-8").replace("__VERSION__", __version__)
+        return Response(body, media_type="application/javascript")
 
     @app.get("/api/version")
     async def version():
@@ -204,6 +206,72 @@ def create_app(cfg: Optional[Dict[str, Any]] = None, service: Optional[ScannerSe
     async def alerts_history(days: float = Query(30.0, ge=1, le=365),
                              limit: int = Query(500, ge=1, le=5000)):
         return await svc.alert_history(days, limit)
+
+    # ---- v0.8 assets / manual assets (search and resolve before the {symbol} route)
+    def _err(exc: ManualAssetError) -> JSONResponse:
+        return JSONResponse(exc.payload, status_code=exc.status)
+
+    @app.get("/api/assets")
+    async def assets():
+        return svc.assets_payload()
+
+    @app.get("/api/assets/search")
+    async def assets_search(q: str = Query("", max_length=80)):
+        try:
+            return await svc.search_assets(q)
+        except ManualAssetError as exc:
+            return _err(exc)
+
+    @app.get("/api/assets/resolve/{coingecko_id}")
+    async def assets_resolve(coingecko_id: str):
+        try:
+            return await svc.resolve_asset(coingecko_id)
+        except ManualAssetError as exc:
+            return _err(exc)
+
+    @app.get("/api/assets/{symbol}")
+    async def asset(symbol: str):
+        data = svc.asset_payload(symbol)
+        if data is None:
+            raise HTTPException(404, f"{symbol.upper()} is neither monitored nor a manual asset")
+        return data
+
+    @app.post("/api/assets/manual")
+    async def manual_add(body: Dict[str, Any] = Body(default={})):
+        try:
+            return await svc.add_manual_asset(body.get("coingecko_id"), body.get("query"))
+        except ManualAssetError as exc:
+            return _err(exc)
+
+    @app.delete("/api/assets/manual/{symbol}")
+    async def manual_remove(symbol: str):
+        try:
+            return await svc.remove_manual_asset(symbol)
+        except ManualAssetError as exc:
+            return _err(exc)
+
+    @app.put("/api/assets/{symbol}/override")
+    async def asset_override(symbol: str, body: Optional[Dict[str, Any]] = Body(default=None)):
+        try:
+            return await svc.set_asset_override(symbol, body or None)
+        except ManualAssetError as exc:
+            return _err(exc)
+
+    # ---- v0.8 wallet intelligence
+    @app.get("/api/wallet/providers")
+    async def wallet_providers():
+        return svc.wallet_providers_payload()
+
+    @app.get("/api/wallet/status")
+    async def wallet_status():
+        return svc.wallet_status_payload()
+
+    @app.get("/api/wallet/{symbol}")
+    async def wallet_asset(symbol: str):
+        data = svc.wallet_asset_payload(symbol)
+        if data is None:
+            raise HTTPException(404, f"{symbol.upper()} is not monitored")
+        return data
 
     @app.get("/api/crosscheck/{asset}")
     async def crosscheck(asset: str):

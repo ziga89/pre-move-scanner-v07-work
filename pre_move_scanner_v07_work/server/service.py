@@ -7,7 +7,11 @@ Loops (all asyncio, none blocking):
   universe    hourly (CoinGecko) with cached fallback
   discovery   every 30–60 min (exchange catalogs → per-coin venue selection)
   maintenance retention pruning, outcome filling, feed-health snapshots
-  intel       wallet monitor (only when enabled and keyed)
+  registry    asset metadata (chain / platform / contract / provider) from CoinGecko, paced
+  intel       multi-chain wallet monitor (only when enabled)
+
+Universe (v0.8) = CoinGecko Top-100 ∪ persistent manual assets, deduplicated by CoinGecko id.
+Manual status never affects scoring or ranking; it only keeps the asset monitored.
 """
 from __future__ import annotations
 
@@ -26,31 +30,47 @@ from .engine.events import EventDetector
 from .engine.host import LocalEngineHost, MarketSpec, ProcessEngineHost
 from .engine.leadlag import price_lead_lag
 from .feeds.registry import build_adapters
-from .intel.discovery import ContractDiscovery
-from .intel.etherscan import EtherscanClient
+from .intel.chains import CHAINS, chain_name
 from .intel.labels import LabelRegistry
-from .intel.monitor import IntelMonitor
-from .intel.providers import ProviderRegistry
+from .intel.monitor import WalletMonitor
+from .intel.providers import build_providers
+from .intel.registry import READY, REGISTRY_COLS, AssetRegistry, decide
 from .intel.scores import compute_scores, entity_balances
-from .intel.status import asset_status, coverage_summary, gate_scores
+from .intel.status import LABEL as WALLET_LABEL, asset_status, coverage_summary, gate_scores
 from .intel.store import DbIntelStore
 from .storage.db import Database, prune
-from .storage.history import (alert_events_query, alert_row, alerts_query, close_open_alerts, load_token_contracts,
-                              token_contract_row, asset_history, asset_row_1m, asset_row_5s, event_row, events_query, fill_outcomes,
-                              load_asset_closes, load_market_minutes, market_row_10s, market_row_1m, outcome_summary,
-                              venue_history)
-from .storage.schema import (ALERT_COLS, ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_10S_COLS, MARKET_1M_COLS,
-                             TOKEN_CONTRACT_COLS)
+from .storage.history import (alert_events_query, alert_row, alerts_query, close_open_alerts, asset_history,
+                              asset_row_1m, asset_row_5s, event_row, events_query, fill_outcomes, load_asset_closes,
+                              load_market_minutes, load_registry, market_row_10s, market_row_1m, outcome_summary,
+                              registry_row, venue_history)
+from .storage.schema import ALERT_COLS, ASSET_1M_COLS, ASSET_5S_COLS, EVENT_COLS, MARKET_10S_COLS, MARKET_1M_COLS
 from .universe.catalog import Catalog
 from .universe.coingecko import CoinGeckoClient
 from .universe.fx import FxService
 from .universe.http import HttpClient
+from .universe.manual import ManualAssets
 from .universe.universe import UniverseManager
 from .universe.venues import AssetInfo, VenueSelector, crosscheck_unsupported
 from .util import rnd
 
 LATE_GROUP = ("MOVE IN PROGRESS", "LATE")
 QUIET_GROUP = ("NO DATA", "STALE", "WARMING")
+RADAR_ACTIVE = ("WATCH", "CONFIRMING", "HIGH_CONVICTION")
+WALLET_DISPLAY = [  # Health rows: (label, chains)
+    ("Ethereum / EVM", ["ethereum", "bsc", "base", "arbitrum", "optimism", "polygon", "avalanche", "mantle", "linea",
+                        "scroll", "blast"]),
+    ("Bitcoin", ["bitcoin"]), ("Solana", ["solana"]), ("XRPL", ["xrpl"]), ("TRON", ["tron"]), ("XDC", ["xdc"]),
+    ("Hedera", ["hedera"]), ("Cardano", ["cardano"]),
+]
+
+
+class ManualAssetError(Exception):
+    """A manual-asset request that cannot be completed (HTTP status + optional candidates)."""
+
+    def __init__(self, status: int, message: str, **extra):
+        super().__init__(message)
+        self.status = status
+        self.payload = {"detail": message, **extra}
 
 
 def _wallet_cells(ws: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -58,6 +78,7 @@ def _wallet_cells(ws: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not ws:
         return {"state": "WARMING", "label": "WARMING", "reason": "not evaluated yet", "scores": {}}
     return {"state": ws.get("state"), "label": ws.get("label"), "reason": ws.get("reason"),
+            "chain": ws.get("chain_name") or ws.get("chain"),
             "scores": {k: {"state": v.get("state"), "label": v.get("label"), "reason": v.get("reason")}
                        for k, v in (ws.get("scores") or {}).items()}}
 
@@ -78,8 +99,8 @@ class ScannerService:
         self.clock = clock
         self.sim = cfg.get("mode") == "sim" or cfg["feeds"].get("backend") == "sim"
         if self.sim:
-            cfg["universe"] = dict(cfg["universe"], pinned_assets=[])  # real tickers do not exist in SIM
-        self.db = Database(resolve_path(cfg, cfg["storage"]["path"]), cfg["storage"])
+            cfg["universe"] = dict(cfg["universe"], manual_assets=[], pinned_assets=[])  # no real tickers in SIM
+        self.db = Database(resolve_path(cfg, cfg["storage"]["path"]), cfg["storage"], backup_label=f"v{__version__}")
         self.fx = FxService()
         self.adapters, self.sim_driver = build_adapters(cfg, clock=clock)
         self.selector = VenueSelector(cfg["discovery"])
@@ -119,35 +140,43 @@ class ScannerService:
         else:
             self.host = LocalEngineHost(cfg, self.adapters, self.fx.rate, rehydrate=self._rehydrate_market, clock=clock)
 
-        # wallet intelligence (optional)
+        # manual assets (persistent; the config list only seeds symbols never seen before)
+        self.manual = ManualAssets(self.db, clock=clock)
+        if not self.sim:
+            ids = {k.upper(): v for k, v in (cfg["universe"].get("coingecko_ids") or {}).items()}
+            seeded = self.manual.seed(list(cfg["universe"].get("manual_assets") or []), ids)
+            if seeded:
+                self.status["manual_seeded"] = seeded
+
+        # wallet intelligence: providers + asset registry always (Health / Universe show them);
+        # the monitor only runs when intel.enabled
         self.labels = LabelRegistry()
         self.labels.load_csv(resolve_path(cfg, cfg["intel"].get("labels_file", "labels/wallet_labels.csv")))
         self.labels.load_dicts(cfg["intel"].get("legacy_labels", []))
-        self.intel: Optional[IntelMonitor] = None
-        self.intel_store: Optional[DbIntelStore] = None
-        self.providers: Optional[ProviderRegistry] = None
-        self.contract_discovery: Optional[ContractDiscovery] = None
-        if cfg["intel"].get("enabled"):
-            self.intel_store = DbIntelStore(self.db)
-            # one registry of wallet-data providers; Etherscan V2 serves the EVM chains today
-            self.providers = ProviderRegistry([EtherscanClient(self.http, cfg["intel"], budget_store=self.intel_store.budget)])
-            self.intel = IntelMonitor(cfg["intel"], self.labels, self.providers, self._asset_price, store=self.intel_store,
-                                      on_event=self._external_event)
-            if cfg["intel"].get("auto_discover_contracts", True) and not self.sim:
-                try:
-                    cache = self.db.read_sync(load_token_contracts)
-                except Exception:
-                    cache = {}
-                self.contract_discovery = ContractDiscovery(self.cg, cfg["intel"], self.providers.supports,
-                                                            cache=cache, clock=clock)
-                for r in cache.values():
-                    self._track_discovered(r)
+        self.intel_enabled = bool(cfg["intel"].get("enabled")) and not self.sim
+        self.intel_store = DbIntelStore(self.db)
+        self.providers = build_providers(cfg["intel"], self.http, budget_store=self.intel_store.budget, clock=clock)
+        self.registry: Optional[AssetRegistry] = None
+        if not self.sim:
             try:
-                self.intel.transfers = [t for t in self.intel_store.load_transfers(self.clock() - 8 * 86400)]
+                cache = self.db.read_sync(load_registry)
+            except Exception:
+                cache = {}
+            self.registry = AssetRegistry(self.cg, dict(cfg["assets"], discovered_token_wide=cfg["intel"].get(
+                "discovered_token_wide", "off")), self.providers, cache=cache, overrides=self._overrides(), clock=clock)
+            self._persist_registry()
+        self.intel: Optional[WalletMonitor] = None
+        if self.intel_enabled:
+            self.intel = WalletMonitor(cfg["intel"], self.labels, self.providers, self._asset_price,
+                                       store=self.intel_store, on_event=self._external_event, clock=clock,
+                                       on_verify=self._on_verify)
+            try:
+                self.intel.load_history(self.intel_store.load_transfers(self.clock() - 8 * 86400))
                 for b in self.intel_store.load_balances(self.clock() - 8 * 86400):
                     self.intel.balances.setdefault((b["chain"], b["token"], b["address"]), []).append((b["ts"], b["balance"]))
-            except Exception:
-                pass
+            except Exception as exc:
+                self.status["intel_history_error"] = repr(exc)[:200]
+        self.contract_discovery = self.registry          # v0.7 attribute name
 
     # ------------------------------------------------------------------ helpers
     def _asset_price(self, asset: str) -> Optional[float]:
@@ -163,42 +192,83 @@ class ScannerService:
         long_since = self.clock() - float(self.cfg["engine"].get("baseline_long_minutes", 1440)) * 60
         return [r for r in rows if r["ts"] >= long_since]
 
-    def _track_discovered(self, r: Dict[str, Any]) -> None:
-        """Start tracking a safely discovered contract (configured tokens always win)."""
-        if self.intel is None or r.get("state") != "supported" or not r.get("contract"):
+    def _overrides(self) -> Dict[str, Dict[str, Any]]:
+        """Verified overrides: config intel.tokens (v0.7) and assets.overrides (v0.8, wins)."""
+        out: Dict[str, Dict[str, Any]] = {}
+        for sym, spec in (self.cfg["intel"].get("tokens") or {}).items():
+            if isinstance(spec, dict) and (spec.get("contract") or spec.get("native")):
+                out[sym.upper()] = {k: spec[k] for k in ("chain", "contract", "native", "decimals") if k in spec}
+        for sym, spec in (self.cfg.get("assets", {}).get("overrides") or {}).items():
+            if isinstance(spec, dict):
+                out[sym.upper()] = dict(spec)
+        return out
+
+    def _persist_registry(self) -> None:
+        if self.registry is None:
             return
-        self.intel.add_token(r["asset"], r["chain"], r["contract"], r.get("decimals"), source="discovered",
-                             token_wide=str(self.cfg["intel"].get("discovered_token_wide", "off")))
+        rows = self.registry.pop_dirty()
+        if rows:
+            self.db.insert("asset_registry", REGISTRY_COLS, [registry_row(r) for r in rows], critical=True)
+            self._intel_cache.clear()
+
+    def _on_verify(self, asset: str, ok: bool, reason: str) -> None:
+        if self.registry is not None:
+            self.registry.mark_verified(asset, ok, reason)
+            self._persist_registry()
+
+    def _sync_wallet_assets(self) -> None:
+        """Track the READY registry entries of the current universe (config tokens always stay)."""
+        if self.intel is None or self.registry is None:
+            return
+        if not self.cfg["intel"].get("auto_discover_contracts", True):
+            return
+        tracked = [t for t in self.registry.tracked(self.cfg["intel"].get("tokens") or {}) if t.asset in self.info]
+        self.intel.sync(tracked, keep=set(self.info))
+        self._intel_cache.clear()
+
+    def _tiers(self) -> Dict[str, int]:
+        """Provider polling priority per asset: 1 current anomaly, 2 radar WATCH / CONFIRMING,
+        3 manual asset, 4 higher-ranked (top 50), 5 quiet."""
+        radar = {e.get("asset") for e in (self.radar.get("entries") or []) if e.get("state") in RADAR_ACTIVE}
+        out: Dict[str, int] = {}
+        for a, info in self.info.items():
+            r = self.results.get(a) or {}
+            if (r.get("premove") or 0.0) >= 40 or r.get("status") in PRE_MOVE_STATUSES:
+                out[a] = 1
+            elif a in radar:
+                out[a] = 2
+            elif info.manual:
+                out[a] = 3
+            elif (info.rank or 9999) <= 50:
+                out[a] = 4
+            else:
+                out[a] = 5
+        return out
 
     def _discovery_candidates(self) -> List[tuple]:
-        """(asset, coingecko id) for the universe: pinned first, then current anomalies, then by rank."""
-        def prio(a: str):
-            info = self.info[a]
-            return (0 if info.pinned else 1, -(self.results.get(a, {}).get("premove") or 0.0), info.rank or 9999)
-        return [(a, self.info[a].coin_id) for a in sorted(self.info, key=prio) if self.info[a].coin_id]
+        """(asset, coingecko id) in the provider-priority order (anomalies, radar, manual, rank, quiet)."""
+        tiers = self._tiers()
+        order = sorted(self.info, key=lambda a: (tiers.get(a, 5), -(self.results.get(a, {}).get("premove") or 0.0),
+                                                 self.info[a].rank or 9999))
+        return [(a, self.info[a].coin_id) for a in order if self.info[a].coin_id]
 
-    async def _contracts_once(self, max_calls: int) -> List[Dict[str, Any]]:
-        """One discovery pass: look up to `max_calls` universe coins, track and persist the results."""
-        new = await self.contract_discovery.run_once(self._discovery_candidates(),
-                                                     configured=list(self.cfg["intel"].get("tokens") or {}),
-                                                     max_calls=max_calls)
-        for r in new:
-            self._track_discovered(r)
+    async def _registry_once(self, max_calls: int) -> List[Dict[str, Any]]:
+        new = await self.registry.run_once(self._discovery_candidates(), max_calls=max_calls)
+        self._persist_registry()
         if new:
-            self.db.insert("token_contracts", TOKEN_CONTRACT_COLS, [token_contract_row(r) for r in new])
-            self._intel_cache.clear()
+            self._sync_wallet_assets()
         return new
 
-    async def _contracts_loop(self) -> None:
-        per_min = max(0.0, float(self.cfg["intel"].get("discovery_calls_per_minute", 2)))
+    async def _registry_loop(self) -> None:
+        per_min = max(0.0, float(self.cfg["assets"].get("discovery_calls_per_minute", 2)))
         while True:
             await asyncio.sleep(60)
-            if self.contract_discovery is None or per_min <= 0 or not (self.providers and self.providers.keyed()):
+            if self.registry is None or per_min <= 0:
                 continue
             try:
-                await self._contracts_once(int(per_min))
+                await self._registry_once(int(per_min))
             except Exception as exc:
-                self.status["contract_discovery_error"] = repr(exc)[:200]
+                self.status["registry_error"] = repr(exc)[:200]
 
     def _external_event(self, ev: Dict[str, Any]) -> None:
         e = self.events.add_external(ev)
@@ -234,9 +304,10 @@ class ScannerService:
                         asyncio.ensure_future(self._discovery_loop()),
                         asyncio.ensure_future(self._maintenance_loop())]
         if self.intel is not None:
+            self._sync_wallet_assets()
             self._tasks.append(asyncio.ensure_future(self.intel.run(self._stop)))
-        if self.contract_discovery is not None:
-            self._tasks.append(asyncio.ensure_future(self._contracts_loop()))
+        if self.registry is not None:
+            self._tasks.append(asyncio.ensure_future(self._registry_loop()))
 
     async def stop(self) -> None:
         self._stop.set()
@@ -302,55 +373,67 @@ class ScannerService:
                 self.category_ids, self.category_ts = cats, now
         return rows
 
+    def _manual_entries(self) -> List[Dict[str, Any]]:
+        return [{"symbol": r["symbol"], "coingecko_id": r.get("coingecko_id"), "source": r.get("source")}
+                for r in self.manual.active()]
+
+    def _usable(self, r: Dict[str, Any], now: float):
+        u = self.cfg["universe"]
+        sel = self.selector.preview(AssetInfo.from_row(r), self.catalogs.values(), self.fx, now)
+        if not sel.selected:
+            return False, "no usable realtime venue"
+        if sel.total_volume() < float(u.get("min_usable_volume_usd", 250000)):
+            return False, f"insufficient spot volume (${sel.total_volume():,.0f}/24h)"
+        return True, ""
+
     async def refresh_universe(self) -> None:
         now = self.clock()
         cache = resolve_path(self.cfg, "data/universe_cache.json")
-        pinned_rows: List[Dict[str, Any]] = []
+        manual_rows: List[Dict[str, Any]] = []
+        entries = self._manual_entries()          # SIM: only assets added through the API (no config seed)
         try:
             if self.sim:
                 rows = self._sim_rows()
             else:
                 rows = await self._fetch_universe_rows()
-                have = {str(r.get("symbol", "")).upper() for r in rows}
-                ids = self.cfg["universe"].get("coingecko_ids", {})
-                missing = [ids[s] for s in self.cfg["universe"].get("pinned_assets", []) if s not in have and s in ids]
+                have = {r.get("id") for r in rows}
+                missing = sorted({e["coingecko_id"] for e in entries if e.get("coingecko_id") and e["coingecko_id"] not in have})
                 if missing:
-                    pinned_rows = await self.cg.markets(ids=missing, per_page=len(missing))
+                    manual_rows = await self.cg.markets(ids=missing, per_page=len(missing))
                 cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(json.dumps({"ts": now, "rows": rows, "pinned": pinned_rows,
+                cache.write_text(json.dumps({"ts": now, "rows": rows, "manual": manual_rows,
                                              "categories": {k: sorted(v) for k, v in self.category_ids.items()}}))
             src = "sim" if self.sim else "coingecko"
         except Exception as exc:
             if not cache.exists():
                 self.status["universe"] = f"CoinGecko unavailable ({exc!r}); no cached universe"
                 if not self.universe_result:
-                    self._pinned_only()
+                    self._manual_only()
                 return
             data = json.loads(cache.read_text())
-            rows, pinned_rows = data.get("rows", []), data.get("pinned", [])
+            rows, manual_rows = data.get("rows", []), data.get("manual", data.get("pinned", []))
             self.category_ids = {k: set(v) for k, v in data.get("categories", {}).items()} or self.category_ids
             src = f"cache from {time.strftime('%Y-%m-%d %H:%M', time.localtime(data.get('ts', 0)))} (CoinGecko error: {exc!r})"[:200]
-        self.fx.update_from_markets(rows + pinned_rows)
+        self.fx.update_from_markets(rows + manual_rows)
         self.fx.update_from_catalogs(self.catalogs.values())
-        u = self.cfg["universe"]
+        res = self.universe.build(rows, self.category_ids, lambda r: self._usable(r, now), manual_rows, now,
+                                  manual=entries)
+        for m in res["manual"]:
+            if m.get("resolved_by_ticker") and m.get("id"):
+                self.manual.resolve(m["symbol"], m["id"], m.get("name"))
+        self._apply_universe(res, src, now)
 
-        def usable(r):
-            sel = self.selector.preview(AssetInfo.from_row(r), self.catalogs.values(), self.fx, now)
-            if not sel.selected:
-                return False, "no usable realtime venue"
-            if sel.total_volume() < float(u.get("min_usable_volume_usd", 250000)):
-                return False, f"insufficient spot volume (${sel.total_volume():,.0f}/24h)"
-            return True, ""
-        res = self.universe.build(rows, self.category_ids, usable, pinned_rows, now)
+    def _apply_universe(self, res: Dict[str, Any], src: str, now: float) -> None:
         self.universe_result = res
-        self.status["universe"] = f"{len(res['members'])} assets + {sum(1 for p in res['pinned'] if p.get('usable'))} pinned ({src})"
+        manual_ids = {m.get("id") for m in res["manual"] if m.get("id")}
+        extras = [m for m in res["manual"] if m.get("usable") and not m.get("in_top")]
+        self.status["universe"] = f"{len(res['members'])} assets + {len(extras)} manual ({src})"
         self.status["universe_ts"] = now
         new_info: Dict[str, AssetInfo] = {}
         for r in res["members"]:
-            new_info[str(r["symbol"]).upper()] = AssetInfo.from_row(r)
-        for p in res["pinned"]:
-            if p.get("usable"):
-                new_info[str(p["symbol"]).upper()] = AssetInfo.from_row(p, pinned=True)
+            new_info[str(r["symbol"]).upper()] = AssetInfo.from_row(r, manual=r.get("id") in manual_ids)
+        for m in extras:
+            new_info[str(m["symbol"]).upper()] = AssetInfo.from_row(m, manual=True, in_top=False)
         for sym in list(self.assets):
             if sym not in new_info:
                 del self.assets[sym]
@@ -358,27 +441,43 @@ class ScannerService:
                 self.selector.forget(sym)
         for i, (sym, info) in enumerate(new_info.items()):
             if sym not in self.assets:
-                st = AssetState(sym, self.cfg, stagger=i)
-                closes = self.db.read_sync(load_asset_closes, sym, now - 86400)
-                st.rehydrate_closes(closes)
-                self.assets[sym] = st
+                self._new_asset_state(sym, i, now)
         self.info = new_info
+        if self.registry is not None:
+            for sym, info in new_info.items():
+                self.registry.note_member(sym, info.coin_id, info.name, info.rank, info.manual)
+            self._persist_registry()
+        self._sync_wallet_assets()
         snap = [(now, r.get("id"), str(r.get("symbol")).upper(), r.get("name"), r.get("market_cap_rank"),
-                 r.get("market_cap"), 1, 1, 0, 1, "") for r in res["members"]]
-        snap += [(now, p.get("id"), str(p.get("symbol")).upper(), p.get("name"), p.get("market_cap_rank"),
-                  p.get("market_cap"), 1, 0, 1, 1 if p.get("usable") else 0, p.get("status", "")) for p in res["pinned"]]
+                 r.get("market_cap"), 1, 1, 1 if r.get("id") in manual_ids else 0, 1, "") for r in res["members"]]
+        snap += [(now, m.get("id"), str(m.get("symbol")).upper(), m.get("name"), m.get("market_cap_rank"),
+                  m.get("market_cap"), 1, 1 if m.get("usable") else 0, 1, 1 if m.get("usable") else 0,
+                  m.get("status", "")) for m in res["manual"] if not m.get("in_top")]
         snap += [(now, e.get("id"), e.get("symbol"), e.get("name"), e.get("rank"), e.get("market_cap"), 0, 0, 0, 0,
                   e.get("reason")) for e in res["excluded"]]
         self.db.insert("universe_snapshots", ["ts", "coin_id", "symbol", "name", "rank", "market_cap", "eligible",
                                               "in_universe", "pinned", "usable", "reason"], snap, mode="")
 
-    def _pinned_only(self) -> None:
+    def _new_asset_state(self, sym: str, stagger: int, now: float) -> None:
+        st = AssetState(sym, self.cfg, stagger=stagger)
+        closes = self.db.read_sync(load_asset_closes, sym, now - 86400)
+        st.rehydrate_closes(closes)
+        self.assets[sym] = st
+
+    def _manual_only(self) -> None:
+        """CoinGecko down and no cache: monitor the manual assets only."""
         now = self.clock()
-        for sym in self.cfg["universe"].get("pinned_assets", []):
-            self.info[sym] = AssetInfo(symbol=sym, pinned=True)
+        for e in self._manual_entries():
+            sym = e["symbol"]
+            self.info[sym] = AssetInfo(symbol=sym, coin_id=e.get("coingecko_id") or "", manual=True, in_top=False)
             self.assets.setdefault(sym, AssetState(sym, self.cfg))
-        self.universe_result = {"ts": now, "members": [], "pinned": [{"symbol": s, "status": "universe unavailable"}
-                                                                     for s in self.info], "excluded": []}
+        self.universe_result = {"ts": now, "members": [],
+                                "manual": [{"symbol": s, "status": "universe unavailable", "manual": True}
+                                           for s in self.info],
+                                "pinned": [{"symbol": s, "status": "universe unavailable"} for s in self.info],
+                                "excluded": []}
+
+    _pinned_only = _manual_only          # v0.7 name
 
     async def apply_selection(self, only: Optional[set] = None) -> None:
         now = self.clock()
@@ -501,9 +600,8 @@ class ScannerService:
             thin = ((res_prev or {}).get("agg") or {}).get("family", {}).get("thinning", 0.0) if res_prev else 0.0
             scores = compute_scores(asset, self.intel.transfers, self.intel.coverage(asset), now, vol, thin,
                                     whale_candidate_usd=float(icfg.get("whale_candidate_usd", 250000)))
-        status = asset_status(asset, enabled=bool(icfg.get("enabled")) and not self.sim,
-                              keyed=bool(self.providers and self.providers.keyed()), monitor=self.intel,
-                              discovery=self.contract_discovery, labels=self.labels, scores=scores, now=now,
+        status = asset_status(asset, enabled=self.intel_enabled, monitor=self.intel, registry=self.registry,
+                              providers=self.providers, labels=self.labels, scores=scores, now=now,
                               warm_seconds=float(icfg.get("warmup_minutes", 60)) * 60.0)
         if scores is not None:
             status["whale_candidates"] = scores.get("whale_candidates") or []
@@ -543,7 +641,8 @@ class ScannerService:
             res["wallet_status"] = self.wallet_status.get(asset)
             res["name"] = info.name if info else asset
             res["rank"] = info.rank if info else None
-            res["pinned"] = bool(info and info.pinned)
+            res["manual"] = bool(info and info.manual)
+            res["pinned"] = res["manual"]                 # v0.7 field name
             if res.get("price"):
                 self.fx.update_live(asset, res["price"])
             evs = self.events.process(res)
@@ -570,16 +669,15 @@ class ScannerService:
             self.wallet_status.pop(gone, None)
         if now - self._wallet_summary_ts >= 10.0 or not self.wallet_summary:
             self._wallet_summary_ts = now
-            icfg = self.cfg["intel"]
             self.wallet_summary = coverage_summary(
-                self.wallet_status, enabled=bool(icfg.get("enabled")) and not self.sim,
-                keyed=bool(self.providers and self.providers.keyed()), monitor=self.intel,
-                discovery=self.contract_discovery, labels=self.labels,
-                chains=self.providers.supported_chains() if self.providers else [])
+                self.wallet_status, enabled=self.intel_enabled, monitor=self.intel, registry=self.registry,
+                labels=self.labels, providers=self.providers,
+                chains=self.providers.supported_chains() if self.intel_enabled else [])
         self.radar = self.alerts.radar(now, self.wallet_summary, self._feeds_summary())
         if self.intel is not None:
-            top = sorted(self.results.values(), key=lambda r: -(r.get("premove") or 0))[:10]
-            self.intel.priority_assets = {r["asset"] for r in top if (r.get("premove") or 0) >= 40}
+            tiers = self._tiers()
+            self.intel.priority = tiers
+            self.intel.priority_assets = {a for a, t in tiers.items() if t == 1}
 
         # persistence (all via the writer thread)
         pa = float(self.cfg["storage"].get("persist_asset_seconds", 5))
@@ -621,7 +719,8 @@ class ScannerService:
         for r in self.results.values():
             subs = r.get("subscores") or {}
             rows.append({
-                "asset": r["asset"], "name": r.get("name"), "rank": r.get("rank"), "pinned": r.get("pinned"),
+                "asset": r["asset"], "name": r.get("name"), "rank": r.get("rank"), "manual": r.get("manual"),
+                "pinned": r.get("manual"),
                 "status": r["status"], "status_since": r.get("status_since"), "premove": r.get("premove"),
                 "fast": r.get("fast"), "slow": r.get("slow"), "confidence": r.get("confidence"),
                 "liquidity": subs.get("liquidity"), "orderbook": subs.get("orderbook"),
@@ -668,12 +767,7 @@ class ScannerService:
             ref = max(live, key=lambda v: v.get("base_depth_1") or v.get("ask_depth_1") or 0)
             series = {v["exchange"]: self.host.mid_series(v["exchange"], v["symbol"], 600, now) for v in live}
             leadlag = {"reference": ref["exchange"], "venues": price_lead_lag(series, ref["exchange"])}
-        wallet = None
-        if self.intel is not None:
-            tok = self.intel.tokens.get(asset)
-            wallet = {"coverage": self.intel.coverage(asset), "status": self.intel.status,
-                      "token": tok, "balances": entity_balances(self.intel.balances, self.labels, tok["contract"], now) if tok else [],
-                      "recent": [t for t in self.intel.transfers if t["asset"] == asset][-50:][::-1]}
+        wallet = self._wallet_detail(asset, now)
         info = self.info.get(asset)
         out = dict(r)
         out.pop("transitions", None)
@@ -685,6 +779,7 @@ class ScannerService:
                     "radar_entry": next((e for e in (self.radar.get("entries") or []) if e.get("asset") == asset), None),
                     "events": self.events.recent(asset, now - 6 * 3600)[-80:],
                     "wallet": wallet, "unsupported_top": self.unsupported_top.get(asset, []),
+                    "registry": self.registry.public(asset) if self.registry is not None else None,
                     "fx": {q: self.fx.rate(q) for q in {v.get("quote") for v in r.get("venues", [])} if q}})
         return _json_safe(out)
 
@@ -699,24 +794,361 @@ class ScannerService:
             "ts": self.clock(), "version": __version__, "mode": "sim" if self.sim else "live",
             "status": self.status, "engine": h, "catalogs": cats, "venue_states": venue_states,
             "coingecko": self.cg.stats(),
-            "etherscan": (self.providers.stats().get("etherscan", {}) if self.providers else {"enabled": False}),
+            "etherscan": (self.providers.stats().get("etherscan", {}) if self.intel_enabled else {"enabled": False}),
             "intel_status": (self.intel.status if self.intel else "disabled"),
             "storage": self.db.stats(), "fx": self.fx.snapshot(),
             "labels": {"count": len(self.labels.labels), "errors": self.labels.errors[:20]},
             "alerts": {"active": len(self.alerts.active()), "enabled": bool(self.cfg.get("alerts", {}).get("enabled", True)),
                        "radar_state": self.radar.get("state")},
             "wallet_intel": self.wallet_summary,
-            "wallet_providers": self.providers.stats() if self.providers else {},
+            "wallet_providers": self.wallet_providers_payload(),
+            "asset_registry": self.registry.stats() if self.registry is not None else None,
+            "manual_assets": len(self.manual.active()),
         })
 
     def universe_payload(self) -> Dict[str, Any]:
         u = dict(self.universe_result or {})
         u["members"] = [{"symbol": str(m.get("symbol")).upper(), "id": m.get("id"), "name": m.get("name"),
-                         "rank": m.get("market_cap_rank"),
+                         "rank": m.get("market_cap_rank"), "manual": bool(self.info.get(str(m.get("symbol")).upper())
+                                                                          and self.info[str(m.get("symbol")).upper()].manual),
                          "venues": [x["exchange"] for x in (self.selections.get(str(m.get("symbol")).upper()).selected
                                                             if self.selections.get(str(m.get("symbol")).upper()) else [])]}
                         for m in u.get("members", [])]
+        u["manual"] = self.manual_payload()
+        u["pinned"] = [m for m in u["manual"] if not m.get("in_top")]
+        u["counts"] = {"top": len(u["members"]), "manual": len(u["manual"]),
+                       "manual_outside_top": sum(1 for m in u["manual"] if not m.get("in_top") and m.get("monitored")),
+                       "monitored": len(self.info)}
         return _json_safe(u)
+
+    # ------------------------------------------------------------------ v0.8 assets / manual assets
+    def _venues_found(self, row: Dict[str, Any], now: float) -> List[Dict[str, Any]]:
+        sel = self.selector.preview(AssetInfo.from_row(row), self.catalogs.values(), self.fx, now)
+        return [{"exchange": m["exchange"], "symbol": m["symbol"], "volume_24h_usd": m["volume_24h_usd"]}
+                for m in sel.candidates[:8]]
+
+    def _monitor_state(self, sym: str) -> str:
+        if sym not in self.info:
+            return "NOT MONITORED"
+        r = self.results.get(sym)
+        if r is None or r.get("status") in ("WARMING", "NO DATA"):
+            return "WARMING"
+        if r.get("status") == "STALE":
+            return "STALE"
+        return "ACTIVE"
+
+    def manual_payload(self) -> List[Dict[str, Any]]:
+        by_sym = {str(m.get("symbol", "")).upper(): m for m in (self.universe_result or {}).get("manual", [])}
+        out = []
+        for row in self.manual.active():
+            sym = row["symbol"]
+            m = by_sym.get(sym, {})
+            info = self.info.get(sym)
+            reg = self.registry.public(sym) if self.registry is not None else None
+            ws = self.wallet_status.get(sym) or {}
+            monitored = sym in self.info
+            if monitored:
+                state = self._monitor_state(sym)
+            elif m.get("candidates") is not None:
+                state = "NEEDS SELECTION"
+            elif m and not m.get("usable"):
+                state = "NO VENUE" if "venue" in str(m.get("status", "")) or "volume" in str(m.get("status", "")) else "BLOCKED"
+            else:
+                state = "PENDING"
+            out.append({"symbol": sym, "coingecko_id": row.get("coingecko_id") or m.get("id"),
+                        "name": (info.name if info else None) or row.get("name") or m.get("name"),
+                        "rank": (info.rank if info else None) or m.get("market_cap_rank"),
+                        "added_ts": row.get("added_ts"), "source": row.get("source"),
+                        "in_top": bool(info.in_top) if info else bool(m.get("in_top")), "monitored": monitored,
+                        "state": state, "status": m.get("status") or ("monitored" if monitored else "waiting for the next universe refresh"),
+                        "candidates": m.get("candidates"),
+                        "chain": (reg or {}).get("chain_name"), "native": (reg or {}).get("native_asset"),
+                        "contract": (reg or {}).get("contract_address"), "registry_state": (reg or {}).get("state"),
+                        "wallet": {"state": ws.get("state"), "label": ws.get("label"), "reason": ws.get("reason")},
+                        "scanner_status": (self.results.get(sym) or {}).get("status")})
+        return out
+
+    def _asset_row(self, sym: str) -> Dict[str, Any]:
+        info = self.info.get(sym)
+        r = self.results.get(sym) or {}
+        ws = self.wallet_status.get(sym) or {}
+        sel = self.selections.get(sym)
+        return {"symbol": sym, "name": info.name if info else None, "coingecko_id": info.coin_id if info else None,
+                "rank": info.rank if info else None, "manual": bool(info and info.manual),
+                "in_top": bool(info and info.in_top), "monitored": sym in self.info,
+                "scanner_status": r.get("status"), "premove": r.get("premove"),
+                "venues": [m["exchange"] for m in (sel.selected if sel else [])],
+                "registry": self.registry.public(sym) if self.registry is not None else None,
+                "wallet": {"state": ws.get("state"), "label": ws.get("label"), "reason": ws.get("reason"),
+                           "chain": ws.get("chain_name"), "provider": ws.get("provider")}}
+
+    def assets_payload(self) -> Dict[str, Any]:
+        rows = [self._asset_row(s) for s in sorted(self.info, key=lambda a: (self.info[a].rank or 9999, a))]
+        return _json_safe({"ts": self.clock(), "count": len(rows), "assets": rows, "manual": self.manual_payload(),
+                           "registry": self.registry.stats() if self.registry is not None else None})
+
+    def asset_payload(self, symbol: str) -> Optional[Dict[str, Any]]:
+        sym = symbol.upper()
+        if sym not in self.info and self.manual.get(sym) is None and not (self.registry and self.registry.get(sym)):
+            return None
+        out = self._asset_row(sym)
+        out["manual_entry"] = next((m for m in self.manual_payload() if m["symbol"] == sym), None)
+        out["wallet_status"] = self.wallet_status.get(sym)
+        return _json_safe(out)
+
+    def _candidate(self, coin: Dict[str, Any], row: Optional[Dict[str, Any]], now: float) -> Dict[str, Any]:
+        cid = coin.get("id")
+        sym = str(coin.get("symbol") or (row or {}).get("symbol") or "").upper()
+        info = self.info.get(sym)
+        reg = self.registry.public(sym) if self.registry is not None else None
+        if reg and reg.get("coingecko_id") != cid:
+            reg = None
+        return {"coingecko_id": cid, "symbol": sym, "name": coin.get("name") or (row or {}).get("name"),
+                "market_cap_rank": (row or {}).get("market_cap_rank") or coin.get("market_cap_rank"),
+                "price_usd": (row or {}).get("current_price"),
+                "volume_24h_usd": (row or {}).get("total_volume"),
+                "in_universe": bool(info and info.coin_id == cid), "in_top100": bool(info and info.coin_id == cid and info.in_top),
+                "manual": bool(self.manual.get(sym) and self.manual.get(sym).get("coingecko_id") == cid),
+                "ticker_taken_by": (f"{info.name} ({info.coin_id})" if info and info.coin_id and info.coin_id != cid else None),
+                "venues": self._venues_found(row, now) if row else [],
+                "metadata": {k: (reg or {}).get(k) for k in ("state", "chain_name", "native_asset", "token_platform",
+                                                              "contract_address", "wallet_provider", "wallet_supported",
+                                                              "reason")} if reg else None}
+
+    def _sim_coin_rows(self) -> List[Dict[str, Any]]:
+        return self._sim_rows() if self.sim_driver is not None else []
+
+    async def search_assets(self, query: str) -> Dict[str, Any]:
+        """Resolve a ticker, name or CoinGecko id into candidates (never picks one by itself)."""
+        q = str(query or "").strip()
+        now = self.clock()
+        if len(q) < 1:
+            return {"query": q, "candidates": [], "ambiguous": False}
+        limit = int(self.cfg["assets"].get("search_limit", 8))
+        ql = q.lower()
+        if self.sim:
+            rows = [r for r in self._sim_coin_rows() if ql in (r["symbol"], r["id"], r["name"].lower())]
+            coins, by_id = [{"id": r["id"], "symbol": r["symbol"], "name": r["name"],
+                             "market_cap_rank": r["market_cap_rank"]} for r in rows], {r["id"]: r for r in rows}
+        else:
+            coins = await self.cg.search(q)
+            coins.sort(key=lambda c: (0 if str(c.get("symbol", "")).lower() == ql or c.get("id") == ql else 1,
+                                      c.get("market_cap_rank") or 10 ** 9))
+            coins = coins[:limit]
+            rows = await self.cg.markets(ids=[c["id"] for c in coins], per_page=max(1, len(coins))) if coins else []
+            by_id = {r.get("id"): r for r in rows}
+        cands = [self._candidate(c, by_id.get(c.get("id")), now) for c in coins]
+        exact = [c for c in cands if c["symbol"].lower() == ql]
+        return _json_safe({"query": q, "candidates": cands, "exact_ticker_matches": len(exact),
+                           "ambiguous": len(exact) > 1,
+                           "note": "Select the coin you mean; a ticker is never resolved automatically."})
+
+    async def resolve_asset(self, coingecko_id: str) -> Dict[str, Any]:
+        """Full preview of one coin before adding it: chain / platform / contract / provider / venues."""
+        cid = str(coingecko_id or "").strip()
+        now = self.clock()
+        if self.sim:
+            rows = [r for r in self._sim_coin_rows() if r["id"] == cid]
+            if not rows:
+                raise ManualAssetError(404, f"'{cid}' is not a SIM coin")
+            cand = self._candidate({"id": cid, "symbol": rows[0]["symbol"], "name": rows[0]["name"]}, rows[0], now)
+            cand["metadata"] = {"state": "UNSUPPORTED", "reason": "SIM coin (no chain)"}
+            return _json_safe({"candidate": cand, "wallet": {"supported": False, "reason": "SIM mode"}})
+        rows = await self.cg.markets(ids=[cid], per_page=1)
+        if not rows:
+            raise ManualAssetError(404, f"CoinGecko id '{cid}' not found")
+        row = rows[0]
+        sym = str(row.get("symbol", "")).upper()
+        detail = await self.cg.coin_detail(cid)
+        dec = decide(sym, cid, detail, self.providers, now)
+        if self.registry is not None and (self.registry.get(sym) is None or self.registry.get(sym).get("coingecko_id") == cid):
+            self.registry._put(dict(dec, name=row.get("name"), market_cap_rank=row.get("market_cap_rank")))
+            self._persist_registry()
+        cand = self._candidate({"id": cid, "symbol": sym, "name": row.get("name")}, row, now)
+        cand["metadata"] = {k: dec.get(k) for k in ("state", "native_chain", "native_asset", "token_platform",
+                                                     "contract_address", "wallet_provider", "wallet_supported", "reason",
+                                                     "discovery_confidence")}
+        cand["metadata"]["chain_name"] = chain_name(dec.get("native_chain")) if dec.get("native_chain") else None
+        cs = self.providers.chain_state(dec["native_chain"]) if dec.get("native_chain") else None
+        return _json_safe({"candidate": cand, "wallet": {
+            "supported": bool(dec.get("wallet_supported")), "provider": dec.get("wallet_provider"),
+            "provider_state": cs, "reason": dec.get("reason"), "intel_enabled": self.intel_enabled}})
+
+    async def add_manual_asset(self, coingecko_id: Optional[str] = None, query: Optional[str] = None) -> Dict[str, Any]:
+        """Add a manual asset by CoinGecko id (a query alone only returns candidates to choose from)."""
+        now = self.clock()
+        cid = str(coingecko_id or "").strip()
+        if not cid:
+            res = await self.search_assets(query or "")
+            raise ManualAssetError(409 if res["candidates"] else 404,
+                                   "select one coin (coingecko_id); a ticker is never resolved automatically"
+                                   if res["candidates"] else f"no CoinGecko coin matches '{query}'",
+                                   candidates=res["candidates"])
+        if self.sim:
+            rows = [r for r in self._sim_coin_rows() if r["id"] == cid]
+        else:
+            rows = await self.cg.markets(ids=[cid], per_page=1)
+        if not rows:
+            raise ManualAssetError(404, f"CoinGecko id '{cid}' not found")
+        row = rows[0]
+        sym = str(row.get("symbol", "")).upper()
+        info = self.info.get(sym)
+        if info is not None and info.coin_id and info.coin_id != cid:
+            raise ManualAssetError(409, f"ticker {sym} is already monitored as {info.name} ({info.coin_id}); "
+                                        "two coins with one ticker cannot be monitored side by side")
+        existing = self.manual.get(sym)
+        if existing and existing.get("coingecko_id") == cid:
+            return _json_safe({"status": "already", "asset": self.asset_payload(sym)})
+        self.manual.add(sym, cid, row.get("name"))
+        if self.registry is not None:
+            self.registry.note_member(sym, cid, row.get("name"), row.get("market_cap_rank"), True)
+            e = self.registry.get(sym)
+            if e is not None and e.get("state") != READY or (e and e.get("coingecko_id") != cid):
+                try:
+                    await self.registry.lookup(sym, cid)
+                except Exception as exc:
+                    self.status["registry_error"] = repr(exc)[:200]
+            self._persist_registry()
+        status = await self._integrate_manual(sym, row, now)
+        return _json_safe({"status": "added", "integration": status, "asset": self.asset_payload(sym)})
+
+    async def _integrate_manual(self, sym: str, row: Dict[str, Any], now: float) -> str:
+        """Bring a newly added manual asset into the running universe without a restart."""
+        info = self.info.get(sym)
+        if not self.universe_result:
+            self.universe_result = {"ts": now, "members": [], "manual": [], "pinned": [], "excluded": []}
+        manual_list = self.universe_result.setdefault("manual", [])
+        manual_list[:] = [m for m in manual_list if str(m.get("symbol", "")).upper() != sym]
+        if info is not None:
+            info.manual = True
+            manual_list.append({**row, "manual": True, "usable": True, "in_top": info.in_top,
+                                "status": "in the Top-100 (not duplicated)" if info.in_top else "ok"})
+            if self.registry is not None:
+                self.registry.note_member(sym, info.coin_id, info.name, info.rank, True)
+                self._persist_registry()
+            return "already monitored (Top-100 member) - now also a manual asset"
+        self.fx.update_from_markets([row])
+        ok, why = self._usable(row, now)
+        if not ok:
+            manual_list.append({**row, "manual": True, "usable": False, "in_top": False, "status": why})
+            return f"saved; not monitored yet: {why} (re-checked on every universe refresh)"
+        manual_list.append({**row, "manual": True, "usable": True, "in_top": False, "status": "ok"})
+        self.info[sym] = AssetInfo.from_row(row, manual=True, in_top=False)
+        self._new_asset_state(sym, len(self.assets), now)
+        await self.apply_selection(only={sym})
+        self._sync_wallet_assets()
+        return "monitoring started: venues selected, feeds subscribing, baselines warming"
+
+    async def remove_manual_asset(self, symbol: str) -> Dict[str, Any]:
+        """Stop monitoring a manual-only asset (history is kept); a Top-100 member stays monitored."""
+        sym = symbol.upper()
+        if not self.manual.remove(sym):
+            raise ManualAssetError(404, f"{sym} is not a manual asset")
+        info = self.info.get(sym)
+        manual_list = (self.universe_result or {}).get("manual") or []
+        manual_list[:] = [m for m in manual_list if str(m.get("symbol", "")).upper() != sym]
+        if info is not None and info.in_top:
+            info.manual = False
+            result = "removed from manual assets; still monitored as a Top-100 member"
+        elif info is not None:
+            del self.info[sym]
+            self.assets.pop(sym, None)
+            self.results.pop(sym, None)
+            self.selector.forget(sym)
+            self.selections.pop(sym, None)
+            await self.apply_selection(only=set())
+            if self.intel is not None:
+                self.intel.untrack(sym)
+            result = "monitoring stopped; stored history kept"
+        else:
+            result = "removed (it was not being monitored)"
+        if self.registry is not None and self.registry.get(sym):
+            self.registry._put({"symbol": sym, "manual": 0})
+            self._persist_registry()
+        return {"status": "removed", "symbol": sym, "result": result}
+
+    async def set_asset_override(self, symbol: str, spec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if self.registry is None:
+            raise ManualAssetError(400, "no asset registry in SIM mode")
+        sym = symbol.upper()
+        self.registry.set_override(sym, spec)
+        self._persist_registry()
+        self._sync_wallet_assets()
+        return _json_safe({"symbol": sym, "registry": self.registry.public(sym)})
+
+    # ------------------------------------------------------------------ v0.8 wallet payloads
+    def _wallet_detail(self, asset: str, now: float) -> Optional[Dict[str, Any]]:
+        if self.intel is None:
+            return None
+        t = self.intel.assets.get(asset)
+        return {"coverage": self.intel.coverage(asset), "status": self.intel.status,
+                "token": t.to_dict() if t else None,
+                "balances": entity_balances(self.intel.balances, self.labels, t.key, now) if t else [],
+                "recent": [x for x in self.intel.transfers if x["asset"] == asset][-50:][::-1]}
+
+    def wallet_providers_payload(self) -> Dict[str, Any]:
+        view = self.intel.provider_view() if self.intel is not None else {}
+        by_provider: Dict[str, set] = {}
+        if self.registry is not None:
+            for sym, e in self.registry.entries.items():
+                if sym in self.info and e.get("wallet_provider") and e.get("state") == READY:
+                    by_provider.setdefault(e["wallet_provider"], set()).add(sym)
+        providers = []
+        for p in self.providers.providers:
+            st = p.stats()
+            v = view.get(p.name, {})
+            state, reason = st["state"], st["reason"]
+            if not self.intel_enabled:
+                state, reason = "off", "wallet intelligence is off (config intel.enabled = false)"
+            providers.append({**st, "state": state, "reason": reason,
+                              "auth": "no key needed" + (" (optional key set)" if p.key else "") if not p.requires_key
+                              else ("key set" if p.keyed else f"NO KEY - set {p.key_env}"),
+                              "assets": sorted(set(v.get("assets", [])) | by_provider.get(p.name, set())),
+                              "addresses": v.get("addresses", 0), "lagging": v.get("lagging", 0),
+                              "polled": v.get("polled", 0)})
+        rows = []
+        for label, chains in WALLET_DISPLAY:
+            p = self.providers.assigned(chains[0])
+            cs = self.providers.chain_state(chains[0])
+            assets = sorted(a for a, ws in self.wallet_status.items() if ws.get("chain") in chains)
+            states: Dict[str, int] = {}
+            for a in assets:
+                k = self.wallet_status[a].get("state")
+                states[k] = states.get(k, 0) + 1
+            pst = p.stats() if p is not None else {}
+            state = cs.get("state") if self.intel_enabled else "off"
+            rows.append({"label": label, "chains": chains, "provider": p.name if p else None,
+                         "provider_label": getattr(p, "label", None), "enabled": bool(p and p.enabled and self.intel_enabled),
+                         "state": state, "reason": cs.get("reason") if self.intel_enabled else "wallet intelligence is off",
+                         "auth": ("no key needed" if p is not None and not p.requires_key else
+                                  ("key set" if p is not None and p.keyed else f"NO KEY - set {getattr(p, 'key_env', '')}")),
+                         "assets": assets, "asset_states": states, "calls": pst.get("calls"),
+                         "used_today": pst.get("used_today"), "daily_budget": pst.get("daily_budget"),
+                         "rate_limited": pst.get("rate_limited"), "rate_limit_hits": pst.get("rate_limit_hits"),
+                         "errors": pst.get("errors"), "last_success": pst.get("last_success"),
+                         "last_error": pst.get("last_error"),
+                         "chain_errors": {c: e for c, e in (pst.get("chain_errors") or {}).items() if c in chains},
+                         "shared_budget": label == "XDC"})
+        unsupported = sorted({ws.get("chain_name") or ws.get("chain") for ws in self.wallet_status.values()
+                              if ws.get("state") == "UNSUPPORTED" and (ws.get("chain") or ws.get("chain_name"))})
+        return _json_safe({"enabled": self.intel_enabled, "providers": providers, "chains": rows,
+                           "unsupported_chains": unsupported,
+                           "not_implemented": sorted(c.name for c in CHAINS.values() if c.provider is None),
+                           "states": list(WALLET_LABEL.values())})
+
+    def wallet_status_payload(self) -> Dict[str, Any]:
+        return _json_safe({"ts": self.clock(), "summary": self.wallet_summary,
+                           "assets": {a: {k: v for k, v in s.items() if k != "whale_candidates"}
+                                      for a, s in sorted(self.wallet_status.items())}})
+
+    def wallet_asset_payload(self, symbol: str) -> Optional[Dict[str, Any]]:
+        sym = symbol.upper()
+        if sym not in self.wallet_status and sym not in self.info:
+            return None
+        r = self.results.get(sym) or {}
+        return _json_safe({"asset": sym, "status": self.wallet_status.get(sym), "intel": r.get("intel"),
+                           "registry": self.registry.public(sym) if self.registry is not None else None,
+                           "detail": self._wallet_detail(sym, self.clock())})
 
     async def history(self, asset: str, hours: float, max_points: int = 1500) -> Dict[str, Any]:
         asset = asset.upper()

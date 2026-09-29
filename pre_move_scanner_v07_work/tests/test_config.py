@@ -28,7 +28,8 @@ class ConfigTest(unittest.TestCase):
     def test_v06_config_is_understood(self):
         (self.d / "config.json").write_text(json.dumps(V06_CONFIG))
         c = load_config(self.d)
-        self.assertEqual(c["universe"]["pinned_assets"][:3], ["QNT", "LINK", "XDC"])
+        # v0.8: the v0.6 watchlist / v0.7 pinned list becomes the initial manual-asset list
+        self.assertEqual(c["universe"]["manual_assets"][:3], ["QNT", "LINK", "XDC"])
         self.assertEqual(c["universe"]["coingecko_ids"]["QNT"], "quant-network")
         self.assertEqual(c["engine"]["baseline_minutes"], 120)
         self.assertEqual(c["engine"]["min_baseline_minutes"], 20)
@@ -57,7 +58,7 @@ class ConfigTest(unittest.TestCase):
     def test_legacy_usdt_watchlist(self):
         (self.d / "config.json").write_text(json.dumps({"watchlist": ["QNTUSDT", "AUDIOUSDT"]}))
         c = load_config(self.d)
-        self.assertIn("AUDIO", c["universe"]["pinned_assets"])
+        self.assertIn("AUDIO", c["universe"]["manual_assets"])
 
 
 if __name__ == "__main__":

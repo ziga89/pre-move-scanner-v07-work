@@ -94,14 +94,14 @@ class RadarStateTests(RadarBase):
         e.update(good(premove=78.0), T)
         r = e.radar(T + 1)
         self.assertEqual(r["state"], "WATCH")
-        self.assertEqual(r["label"], "WATCH / CONFIRMING")
+        self.assertEqual(r["label"], "WATCH")          # v0.8: WATCH and CONFIRMING are separate labels
         self.assertTrue(any("pre-move 78" in m for m in r["primary"]["missing"]))
         # strict holds -> CONFIRMING with a persistence timer
         e.update(good(), T + 10)
         e.update(good(), T + 70)
         r = e.radar(T + 70)
         self.assertEqual(r["state"], "CONFIRMING")
-        self.assertEqual(r["label"], "WATCH / CONFIRMING")
+        self.assertEqual(r["label"], "CONFIRMING")
         self.assertAlmostEqual(r["primary"]["persistence_s"], 60.0)
         self.assertEqual(r["primary"]["persistence_required_s"], 120.0)
         # held for 120 s -> HIGH-CONVICTION BUY SETUP
@@ -450,7 +450,7 @@ class PersistenceRowsTests(RadarBase):
         self.assertIn("price no longer flat", rows[0]["end_reason"])
 
     def test_labels_cover_all_states(self):
-        self.assertEqual(set(LABELS.values()), {"NO HIGH-CONVICTION SETUP", "WATCH / CONFIRMING",
+        self.assertEqual(set(LABELS.values()), {"NO HIGH-CONVICTION SETUP", "WATCH", "CONFIRMING",
                                                 "HIGH-CONVICTION BUY SETUP", "INVALIDATED"})
 
 

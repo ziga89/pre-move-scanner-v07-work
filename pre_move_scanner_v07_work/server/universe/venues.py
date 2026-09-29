@@ -43,13 +43,18 @@ class AssetInfo:
     price_usd: Optional[float] = None
     market_cap: Optional[float] = None
     volume_24h_usd: Optional[float] = None
-    pinned: bool = False
+    manual: bool = False              # a manual asset (v0.7: "pinned"); never affects score or ranking
+    in_top: bool = True               # a Top-N member (a manual asset outside the Top-N: False)
 
     @classmethod
-    def from_row(cls, r: Dict[str, Any], pinned: bool = False) -> "AssetInfo":
+    def from_row(cls, r: Dict[str, Any], pinned: bool = False, manual: bool = False, in_top: bool = True) -> "AssetInfo":
         return cls(symbol=str(r.get("symbol", "")).upper(), coin_id=str(r.get("id", "")), name=str(r.get("name", "")),
                    rank=r.get("market_cap_rank"), price_usd=r.get("current_price"), market_cap=r.get("market_cap"),
-                   volume_24h_usd=r.get("total_volume"), pinned=pinned)
+                   volume_24h_usd=r.get("total_volume"), manual=bool(manual or pinned), in_top=in_top)
+
+    @property
+    def pinned(self) -> bool:          # v0.7 name
+        return self.manual
 
 
 @dataclass

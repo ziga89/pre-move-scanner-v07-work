@@ -46,7 +46,8 @@ class StorageTest(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def test_migrations_and_wal(self):
-        self.assertEqual(self.db.applied, [1, 2])   # 2 = v0.7.3 alerts + token_contracts
+        self.assertEqual(self.db.applied, [1, 2, 3])   # 2 = v0.7.3 alerts + token_contracts, 3 = v0.8 registry
+        self.assertTrue(self.db.new_install)
         mode = self.db.read_sync(lambda c: c.execute("PRAGMA journal_mode").fetchone()[0])
         self.assertEqual(mode.lower(), "wal")
         db2 = Database(self.dir / "v07.db", {})  # re-open: nothing re-applied
@@ -218,7 +219,7 @@ class StorageTest(unittest.TestCase):
         self.assertIsNone(got["BTC"]["contract"])
 
     def test_upgrade_from_v072_database_keeps_data(self):
-        """A v0.7.2 database has only migration 1: re-opening applies 2 and keeps every row."""
+        """A v0.7.2 database has only migration 1: re-opening applies 2 and 3 and keeps every row."""
         p = self.dir / "v072.db"
         con = sqlite3.connect(p)
         con.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_ts REAL, description TEXT)")
@@ -231,7 +232,7 @@ class StorageTest(unittest.TestCase):
         con.close()
         db = Database(p, cfg()["storage"])
         try:
-            self.assertEqual(db.applied, [2])
+            self.assertEqual(db.applied, [2, 3])
             n = db.read_sync(lambda c: c.execute("SELECT COUNT(*) FROM asset_metrics_5s").fetchone()[0])
             self.assertEqual(n, 1)
             tables = db.read_sync(lambda c: {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")})

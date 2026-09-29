@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 
 from . import __version__
 from .config import deep_merge, load_config
-from .service import ScannerService
+from .service import ManualAssetError, ScannerService
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
@@ -71,7 +71,7 @@ class _Runner:
 
 def make_handler(runner: _Runner):
     class H(BaseHTTPRequestHandler):
-        server_version = "PreMoveDev/0.7"
+        server_version = f"PreMoveDev/{__version__}"
 
         def log_message(self, fmt, *args):  # quiet
             return
@@ -94,6 +94,8 @@ def make_handler(runner: _Runner):
             except (FileNotFoundError, IsADirectoryError, PermissionError):
                 self._json({"detail": "not found"}, 404)
                 return
+            if path.name == "sw.js":
+                body = body.replace(b"__VERSION__", __version__.encode())
             ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
             if path.suffix == ".js":
                 ctype = "application/javascript"
@@ -145,9 +147,74 @@ def make_handler(runner: _Runner):
                                                   min(5000, max(1, int(q.get("limit", 500))))))
                 if p == "/api/radar":
                     return self._json(runner.call(svc.radar_payload))
+                if p == "/api/assets":
+                    return self._json(runner.call(svc.assets_payload))
+                if p == "/api/assets/search":
+                    return self._json(runner.call(svc.search_assets, q.get("q", "")))
+                if p.startswith("/api/assets/resolve/"):
+                    return self._json(runner.call(svc.resolve_asset, urllib.parse.unquote(p.rsplit("/", 1)[1])))
+                if p.startswith("/api/assets/"):
+                    data = runner.call(svc.asset_payload, urllib.parse.unquote(p.rsplit("/", 1)[1]))
+                    return self._json(data if data is not None else {"detail": "not found"}, 200 if data else 404)
+                if p == "/api/wallet/providers":
+                    return self._json(runner.call(svc.wallet_providers_payload))
+                if p == "/api/wallet/status":
+                    return self._json(runner.call(svc.wallet_status_payload))
+                if p.startswith("/api/wallet/"):
+                    data = runner.call(svc.wallet_asset_payload, urllib.parse.unquote(p.rsplit("/", 1)[1]))
+                    return self._json(data if data is not None else {"detail": "not found"}, 200 if data else 404)
                 if p == "/ws":
                     return self._json({"detail": "websocket not available on the dev server; poll /api/top"}, 426)
                 return self._json({"detail": "not found"}, 404)
+            except ManualAssetError as exc:
+                return self._json(exc.payload, exc.status)
+            except Exception as exc:
+                return self._json({"detail": repr(exc)}, 500)
+
+        def _body(self) -> Any:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n <= 0:
+                return None
+            try:
+                return json.loads(self.rfile.read(n).decode("utf-8"))
+            except ValueError:
+                return None
+
+        def do_POST(self):  # noqa: N802
+            p = urllib.parse.urlparse(self.path).path
+            svc = runner.svc
+            try:
+                if p == "/api/assets/manual":
+                    b = self._body() or {}
+                    return self._json(runner.call(svc.add_manual_asset, b.get("coingecko_id"), b.get("query")))
+                return self._json({"detail": "not found"}, 404)
+            except ManualAssetError as exc:
+                return self._json(exc.payload, exc.status)
+            except Exception as exc:
+                return self._json({"detail": repr(exc)}, 500)
+
+        def do_DELETE(self):  # noqa: N802
+            p = urllib.parse.urlparse(self.path).path
+            svc = runner.svc
+            try:
+                if p.startswith("/api/assets/manual/"):
+                    return self._json(runner.call(svc.remove_manual_asset, urllib.parse.unquote(p.rsplit("/", 1)[1])))
+                return self._json({"detail": "not found"}, 404)
+            except ManualAssetError as exc:
+                return self._json(exc.payload, exc.status)
+            except Exception as exc:
+                return self._json({"detail": repr(exc)}, 500)
+
+        def do_PUT(self):  # noqa: N802
+            p = urllib.parse.urlparse(self.path).path
+            svc = runner.svc
+            try:
+                if p.startswith("/api/assets/") and p.endswith("/override"):
+                    sym = urllib.parse.unquote(p.split("/")[3])
+                    return self._json(runner.call(svc.set_asset_override, sym, self._body() or None))
+                return self._json({"detail": "not found"}, 404)
+            except ManualAssetError as exc:
+                return self._json(exc.payload, exc.status)
             except Exception as exc:
                 return self._json({"detail": repr(exc)}, 500)
     return H

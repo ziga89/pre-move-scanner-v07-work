@@ -1,13 +1,12 @@
-"""Signal Radar and strict high-conviction alerts (v0.7.2 alert rail → v0.7.3 radar).
+"""Signal Radar and strict high-conviction alerts (alert rail → radar → v0.8 wallet domains).
 
 This layer sits *above* the ordinary Pre-Move score. It is not an estimate of
 trade probability and never calls a wallet transfer a buy.
 
 Radar states (one headline state is always shown):
   NO HIGH-CONVICTION SETUP   nothing qualifies
-  WATCH / CONFIRMING         WATCH: the mandatory gates hold but not every strict
-                             check; CONFIRMING: every strict check holds and the
-                             persistence timer is running
+  WATCH                      the mandatory gates hold but not every strict check
+  CONFIRMING                 every strict check holds and the persistence timer runs
   HIGH-CONVICTION BUY SETUP  every strict check held continuously for
                              `persistence_seconds` (fired alert)
   INVALIDATED                a fired alert ended (move started, hostile wallet
@@ -25,11 +24,14 @@ A HIGH-CONVICTION alert needs *independent* evidence to agree:
   a fired alert survives a brief dip (`clear_after_seconds`), but a move,
   hostile wallet flow or missing data end it.
 
-Wallet intelligence can strengthen or veto a setup but is never required.
-Exchange / market-maker reshuffling never counts as buying: only labelled
-holders accumulating from exchanges (plus a real supply drain or an attributed
-exchange outflow) is "supportive". Market-maker direction and unattributed
-outflows are never supportive.
+Wallet intelligence is an independent evidence domain: it can strengthen or
+veto a setup but is never required (unavailable wallet data raises the pre-move
+threshold instead). Exchange-internal moves, custody shifts and market-maker
+routing never count as buying: only labelled holders accumulating from
+exchanges (plus a real supply drain or an attributed exchange outflow) is
+"supportive"; hostile flow ("contradictory": exchange inflow, holder
+distribution, MM to exchange) vetoes. Assets from every chain and manual assets
+are treated identically.
 """
 from __future__ import annotations
 
@@ -37,8 +39,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..util import clamp, ramp, rnd
 
-LABELS = {"NONE": "NO HIGH-CONVICTION SETUP", "WATCH": "WATCH / CONFIRMING", "CONFIRMING": "WATCH / CONFIRMING",
+LABELS = {"NONE": "NO HIGH-CONVICTION SETUP", "WATCH": "WATCH", "CONFIRMING": "CONFIRMING",
           "HIGH_CONVICTION": "HIGH-CONVICTION BUY SETUP", "INVALIDATED": "INVALIDATED"}
+WALLET_TEXT = {"supportive": "supportive", "neutral": "neutral", "hostile": "contradictory",
+               "unavailable": "unavailable"}
 MOVE_STATES = {"MOVING", "IN_PROGRESS", "LATE"}          # price no longer flat
 BOOK_FAMILIES = {"thinning", "no_replenish", "bid_support"}
 # WATCH gates whose failure is never a "brief dip" (no linger on the radar)
@@ -136,7 +140,8 @@ class HighConvictionAlerts:
             status = "neutral"
         else:
             status = "unavailable"
-        return {"available": available, "status": status, "supportive": supportive if status == "supportive" else [],
+        return {"available": available, "status": status, "text": WALLET_TEXT[status],
+                "supportive": supportive if status == "supportive" else [],
                 "hostile": hostile, "reshuffle_not_counted": reshuffle,
                 "score": (sum(pos) / len(pos)) if (pos and status == "supportive") else None,
                 "state": explicit.get("state"), "label": explicit.get("label"), "reason": explicit.get("reason")}
@@ -249,11 +254,29 @@ class HighConvictionAlerts:
             missing[missing.index(CHECK_TEXT["venues"])] = \
                 f"{confirmed} confirming venues (needs {int(c.get('min_confirmed_venues', 3))})"
 
+        # plain-language evidence for the bar (what is true right now, not a probability)
+        highlights: List[str] = []
+        if structural_venues >= 2 and (fam.get("thinning") or fam.get("no_replenish")):
+            highlights.append("ask supply draining")
+        if "bid_support" in base_active:
+            highlights.append("bid support building")
+        if buy_venues >= 2 and buy >= float(c.get("min_buy_pressure", 60.0)):
+            highlights.append("sustained buy pressure")
+        if agg.get("vol_ratio") is not None and float(agg["vol_ratio"]) >= float(c.get("min_vol_ratio", 1.25)):
+            highlights.append(f"volume accelerating ({float(agg['vol_ratio']):.1f}x normal)")
+        if late_state == "FLAT":
+            highlights.append("price still flat")
+        highlights.append({"supportive": "wallet / CEX flow supportive", "neutral": "wallet / CEX flow neutral",
+                           "hostile": "wallet / CEX flow contradictory",
+                           "unavailable": "wallet data unavailable (not required)"}[wallet["status"]])
+
         return {
             "strict": strict, "watch": watch, "checks": checks, "gate": gate, "missing": missing,
             "threshold": min_pm, "evidence_score": rnd(evidence, 1), "structure_score": rnd(structure, 1),
             "execution_score": rnd(execution, 1), "wallet": wallet, "reasons": [t for _, t in reasons][:6],
-            "has_data": has_data,
+            "has_data": has_data, "highlights": highlights,
+            "checks_passed": sum(1 for v in checks.values() if v), "checks_total": len(checks),
+            "gates_passed": sum(1 for v in gate.values() if v), "gates_total": len(gate),
         }
 
     # ------------------------------------------------------------------ state machine
@@ -262,9 +285,11 @@ class HighConvictionAlerts:
                 "price": res.get("price"), "confirmed": res.get("confirmed"), "coverage": res.get("coverage"),
                 "coverage_total": res.get("coverage_total"), "confirmed_venues": list(res.get("confirmed_venues") or []),
                 "reasons": a["reasons"][:4], "missing": a["missing"][:4], "threshold": a["threshold"],
-                "wallet": {k: a["wallet"].get(k) for k in ("status", "state", "label", "reason", "supportive",
+                "wallet": {k: a["wallet"].get(k) for k in ("status", "text", "state", "label", "reason", "supportive",
                                                            "hostile", "reshuffle_not_counted")},
-                "late_state": (res.get("late") or {}).get("state"), "strict": a["strict"], "watch": a["watch"]}
+                "late_state": (res.get("late") or {}).get("state"), "strict": a["strict"], "watch": a["watch"],
+                "highlights": a["highlights"], "checks_passed": a["checks_passed"], "checks_total": a["checks_total"],
+                "gates_passed": a["gates_passed"], "gates_total": a["gates_total"]}
 
     def update(self, res: Dict[str, Any], now: float) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], bool]:
         """Advance one asset. Return (active_alert, emitted_events, fired_now)."""
@@ -308,6 +333,7 @@ class HighConvictionAlerts:
                     "structure_score": a["structure_score"], "execution_score": a["execution_score"],
                     "wallet_status": a["wallet"]["status"], "wallet_state": a["wallet"]["state"],
                     "reasons": list(a["reasons"][:4]), "end_reason": None, "checks": dict(a["checks"]),
+                    "highlights": list(a["highlights"]),
                 }
                 st["active"] = alert
                 st["invalidated"] = None
@@ -353,6 +379,7 @@ class HighConvictionAlerts:
             al["wallet_status"] = a["wallet"]["status"]
             al["wallet_state"] = a["wallet"]["state"]
             al["reasons"] = list(a["reasons"][:4])
+            al["highlights"] = list(a["highlights"])
         al["dipping"] = not strict
         if now - float(al.get("_persisted_ts") or 0.0) >= float(self.cfg.get("persist_update_seconds", 30.0)):
             self._mark(al, now)
@@ -503,7 +530,10 @@ class HighConvictionAlerts:
                 "price": last.get("price"), "confirmed": last.get("confirmed"), "coverage": last.get("coverage"),
                 "coverage_total": last.get("coverage_total"), "confirmed_venues": last.get("confirmed_venues") or [],
                 "reasons": last.get("reasons") or [], "missing": last.get("missing") or [],
-                "threshold": last.get("threshold"), "wallet": last.get("wallet") or {}}
+                "threshold": last.get("threshold"), "wallet": last.get("wallet") or {},
+                "highlights": (al or {}).get("highlights") or last.get("highlights") or [],
+                "checks_passed": last.get("checks_passed"), "checks_total": last.get("checks_total"),
+                "gates_passed": last.get("gates_passed"), "gates_total": last.get("gates_total")}
 
 
 def _pct(p0: Any, p1: Any) -> Optional[float]:

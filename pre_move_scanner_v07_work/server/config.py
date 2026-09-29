@@ -3,9 +3,11 @@
 Defaults live here; `config.json` only needs to contain what you change.
 v0.6 keys (`watchlist`, `coingecko_ids`, `venue_discovery`, `baseline_minutes`,
 `warmup_minutes`, `sample_interval_seconds`, `persist_interval_seconds`,
-`onchain`) are still understood and mapped onto the v0.7 sections.
+`onchain`) are still understood and mapped onto the v0.7 sections, and the
+v0.7 key `universe.pinned_assets` is read as `universe.manual_assets`.
 
-The loader never overwrites an existing config.json.
+The loader never overwrites an existing config.json. Secrets are never stored
+in it: `*_api_key_env` / `*_url_env` keys hold environment-variable NAMES only.
 """
 from __future__ import annotations
 
@@ -39,8 +41,10 @@ DEFAULTS: Dict[str, Any] = {
         "refresh_minutes": 60,
         "entry_confirmations": 2,
         "exit_rank_buffer": 15,
-        "pinned_assets": ["QNT", "LINK", "XDC"],
-        "coingecko_ids": {},
+        # initial manual assets (seeded once into SQLite; afterwards managed on the Universe page)
+        "manual_assets": ["QNT", "LINK", "XDC"],
+        # verified CoinGecko ids for the default manual assets (a ticker alone is never guessed)
+        "coingecko_ids": {"QNT": "quant-network", "LINK": "chainlink", "XDC": "xdce-crowd-sale"},
         "exclude_symbols": [],
         "include_symbols": [],
         "exclude_coin_ids": [],
@@ -164,6 +168,16 @@ DEFAULTS: Dict[str, Any] = {
         "onset_hold_seconds": 30,
         "propagation_window_minutes": 15,
     },
+    "assets": {
+        # chain / platform / contract metadata from CoinGecko coin details (shares the CoinGecko budget)
+        "discovery_calls_per_minute": 2,
+        "discovery_ttl_days": 30,
+        "search_limit": 8,
+        # manual overrides for problematic assets, e.g.
+        #   {"XYZ": {"chain": "ethereum", "contract": "0x...", "decimals": 18}}
+        #   {"ABC": {"chain": "xdc", "native": true}}      {"DEF": {"unsupported": "reason"}}
+        "overrides": {},
+    },
     "alerts": {
         "enabled": True,
         # This is a strict composite evidence alarm, not a probability of a profitable trade.
@@ -220,6 +234,8 @@ DEFAULTS: Dict[str, Any] = {
         "persist_market_seconds": 10,
         "writer_queue": 20000,
         "retention_every_minutes": 10,
+        # consistent copy of an existing database before a schema upgrade (skipped when disk space is short)
+        "backup_before_migration": True,
     },
     "intel": {
         "enabled": False,
@@ -242,11 +258,26 @@ DEFAULTS: Dict[str, Any] = {
         "legacy_labels": [],
         # v0.7.3
         "warmup_minutes": 60,               # WARMING until this much transfer history is collected
-        "auto_discover_contracts": True,    # EVM contracts of universe coins from CoinGecko (native tokens only)
-        "discovery_calls_per_minute": 2,    # shares the CoinGecko budget with the universe refresh
-        "discovery_ttl_days": 30,
+        "auto_discover_contracts": True,    # track discovered chains / contracts (asset registry)
         "discovered_token_wide": "off",     # discovered tokens: address-centric only (budget-safe)
         "whale_candidate_usd": 250000,      # unlabelled counterparties above this are listed, never counted
+        # v0.8 multi-chain providers. Keys: environment-variable NAMES only (never the key itself).
+        # The EVM provider (Etherscan V2) uses etherscan_api_key_env / daily_call_budget / calls_per_second.
+        "providers": {
+            "evm": {"enabled": True},
+            "bitcoin": {"enabled": True, "base_urls": ["https://mempool.space/api", "https://blockstream.info/api"],
+                        "daily_call_budget": 20000, "calls_per_second": 1.0},
+            "xrpl": {"enabled": True, "rpc_urls": ["https://xrplcluster.com/", "https://s1.ripple.com:51234/",
+                                                   "https://s2.ripple.com:51234/"],
+                     "daily_call_budget": 20000, "calls_per_second": 2.0},
+            "tron": {"enabled": True, "api_key_env": "TRONGRID_API_KEY", "daily_call_budget": 10000,
+                     "calls_per_second": 1.0},
+            "solana": {"enabled": True, "rpc_url": "https://api.mainnet-beta.solana.com",
+                       "rpc_url_env": "SOLANA_RPC_URL", "daily_call_budget": 20000, "calls_per_second": 2.0},
+            "hedera": {"enabled": True, "daily_call_budget": 20000, "calls_per_second": 2.0},
+            "cardano": {"enabled": True, "api_key_env": "KOIOS_API_TOKEN", "daily_call_budget": 4000,
+                        "calls_per_second": 0.5},
+        },
     },
     "sim": {
         "assets": 12,
@@ -273,16 +304,21 @@ def _map_legacy(raw: Dict[str, Any], warnings: List[str]) -> Dict[str, Any]:
     """Translate v0.6 top-level keys into v0.7 sections (non-destructively)."""
     cfg = copy.deepcopy(raw)
     uni = cfg.setdefault("universe", {})
+    if "pinned_assets" in uni:
+        if "manual_assets" not in uni:
+            uni["manual_assets"] = list(uni.get("pinned_assets") or [])
+            warnings.append("universe.pinned_assets (v0.7) read as universe.manual_assets - the initial manual-asset list")
+        uni.pop("pinned_assets", None)
     if isinstance(raw.get("watchlist"), list):
-        pinned = list(uni.get("pinned_assets", DEFAULTS["universe"]["pinned_assets"]))
+        manual = list(uni.get("manual_assets", DEFAULTS["universe"]["manual_assets"]))
         for sym in raw["watchlist"]:
             s = str(sym).upper()
             if s.endswith("USDT") and len(s) > 4:  # v0.1-v0.3 used Binance pairs like QNTUSDT
                 s = s[:-4]
-            if s not in pinned:
-                pinned.append(s)
-        uni["pinned_assets"] = pinned
-        warnings.append("v0.6 'watchlist' mapped to universe.pinned_assets")
+            if s not in manual:
+                manual.append(s)
+        uni["manual_assets"] = manual
+        warnings.append("v0.6 'watchlist' mapped to universe.manual_assets")
     if isinstance(raw.get("coingecko_ids"), dict):
         ids = dict(uni.get("coingecko_ids", {}))
         ids.update({str(k).upper(): v for k, v in raw["coingecko_ids"].items()})
@@ -329,6 +365,10 @@ def _map_legacy(raw: Dict[str, Any], warnings: List[str]) -> Dict[str, Any]:
             intel["tokens"] = tokens
         intel["legacy_labels"] = legacy_labels
         warnings.append("v0.6 'onchain' section mapped to intel")
+    intel_raw = raw.get("intel") if isinstance(raw.get("intel"), dict) else {}
+    for k in ("discovery_calls_per_minute", "discovery_ttl_days"):       # v0.7.3 intel keys -> assets
+        if k in intel_raw:
+            cfg.setdefault("assets", {}).setdefault(k, intel_raw[k])
     for k in ("watchlist", "coingecko_ids", "venue_discovery", "baseline_minutes", "warmup_minutes",
               "sample_interval_seconds", "persist_interval_seconds", "onchain"):
         cfg.pop(k, None)
